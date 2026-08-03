@@ -472,10 +472,10 @@ struct SettingsView: View {
                     }
                     .disabled(!canDelete)
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    EmptyView()
                 }
                 .menuStyle(.borderlessButton)
-                .frame(width: 24)
+                .fixedSize()
                 .help(canDelete ? "更多操作" : "更多操作（至少保留一个账号）")
             }
             .padding(.vertical, 11)
