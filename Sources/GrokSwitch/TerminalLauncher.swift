@@ -47,7 +47,7 @@ enum TerminalApp: String, Codable, CaseIterable, Identifiable, Equatable {
         }
     }
 
-    /// Fallback app names for `open -na`.
+    /// Fallback app names for path probes.
     var appNames: [String] {
         switch self {
         case .terminal: return ["Terminal"]
@@ -63,12 +63,36 @@ enum TerminalApp: String, Codable, CaseIterable, Identifiable, Equatable {
         }
     }
 
-    /// Whether this app appears to be installed.
+    /// Executable names under Contents/MacOS for direct Process launch.
+    var macOSExecutableNames: [String] {
+        switch self {
+        case .terminal: return ["Terminal"]
+        case .iTerm2: return ["iTerm2"]
+        case .ghostty: return ["ghostty"]
+        case .otty: return ["otty"]
+        case .warp: return ["Warp"]
+        case .alacritty: return ["alacritty"]
+        case .kitty: return ["kitty"]
+        case .wezTerm: return ["wezterm", "wezterm-gui"]
+        case .hyper: return ["Hyper"]
+        case .tabby: return ["Tabby"]
+        }
+    }
+
+    /// Whether launching a command is expected to work reliably.
+    var supportsReliableCommandLaunch: Bool {
+        switch self {
+        case .terminal, .iTerm2, .ghostty, .otty, .alacritty, .kitty, .wezTerm:
+            return true
+        case .warp, .hyper, .tabby:
+            return false
+        }
+    }
+
     var isInstalled: Bool {
         resolvedAppURL() != nil
     }
 
-    /// Resolve the .app URL if installed.
     func resolvedAppURL() -> URL? {
         let workspace = NSWorkspace.shared
         for bundleID in bundleIdentifiers {
@@ -88,7 +112,27 @@ enum TerminalApp: String, Codable, CaseIterable, Identifiable, Equatable {
         return nil
     }
 
-    /// All installed terminal apps (Terminal is always considered available).
+    func resolvedExecutableURL() -> URL? {
+        guard let appURL = resolvedAppURL() else { return nil }
+        let macos = appURL.appendingPathComponent("Contents/MacOS")
+        for name in macOSExecutableNames {
+            let url = macos.appendingPathComponent(name)
+            if FileManager.default.isExecutableFile(atPath: url.path) {
+                return url
+            }
+        }
+        // Fallback: first executable in MacOS.
+        if let items = try? FileManager.default.contentsOfDirectory(atPath: macos.path) {
+            for item in items {
+                let url = macos.appendingPathComponent(item)
+                if FileManager.default.isExecutableFile(atPath: url.path) {
+                    return url
+                }
+            }
+        }
+        return nil
+    }
+
     static var installed: [TerminalApp] {
         allCases.filter { $0 == .terminal || $0.isInstalled }
     }
@@ -99,6 +143,7 @@ enum TerminalLauncher {
         case scriptFailed(String)
         case appNotFound(String)
         case processFailed(String)
+        case grokBinaryNotFound
 
         var errorDescription: String? {
             switch self {
@@ -108,44 +153,77 @@ enum TerminalLauncher {
                 return "找不到终端应用「\(name)」，请在设置中更换"
             case .processFailed(let message):
                 return message
+            case .grokBinaryNotFound:
+                return "找不到 grok 可执行文件（请确认已安装 Grok CLI，或将 grok 加入 PATH）"
             }
         }
     }
 
-    static func open(profile: Profile, terminal: TerminalApp, projectPath: String? = nil) throws {
-        let home = profile.homeURL.path
-        let binary = Paths.resolveGrokBinary()
-        let cwdArg = cwdArgument(projectPath)
-        let command: String
-        if binary.lastPathComponent == "env" {
-            command = "export GROK_HOME=\(shellEscape(home)); exec grok\(cwdArg)"
-        } else {
-            command = "export GROK_HOME=\(shellEscape(home)); exec \(shellEscape(binary.path))\(cwdArg)"
+    /// Result of a launch attempt for honest UI messaging.
+    enum LaunchOutcome: Equatable {
+        case launched
+        case launchedWithWarning(String)
+        case bestEffort(String)
+    }
+
+    @discardableResult
+    static func open(profile: Profile, terminal: TerminalApp, projectPath: String? = nil) throws -> LaunchOutcome {
+        let home = profile.homeURL.standardizedFileURL.path
+        guard Paths.isManagedProfileHome(home) else {
+            throw LaunchError.processFailed("账号路径非法")
         }
+        guard let binary = Paths.resolveGrokBinary() else {
+            throw LaunchError.grokBinaryNotFound
+        }
+
+        let cwd = resolveCwd(projectPath)
+        var warnings: [String] = []
+        if let projectPath, !projectPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, cwd == nil {
+            warnings.append("项目路径无效，已忽略 --cwd")
+        }
+
+        let cwdArg = cwd.map { " --cwd \(ShellQuoting.shellSingleQuoted($0))" } ?? ""
+        let command = "export GROK_HOME=\(ShellQuoting.shellSingleQuoted(home)); exec \(ShellQuoting.shellSingleQuoted(binary.path))\(cwdArg)"
 
         switch terminal {
         case .terminal:
             try openInTerminalApp(command: command)
         case .iTerm2:
             try openInITerm(command: command)
-        case .ghostty:
-            try openWithOpenArgs(app: terminal, args: ["-e", "/bin/zsh", "-lc", command])
         case .otty:
             try openInOtty(command: command)
-        case .warp:
-            // Warp has limited CLI; open a login shell that immediately runs the command.
-            try openWithOpenArgs(app: terminal, args: ["--", "/bin/zsh", "-lc", command])
+        case .ghostty:
+            try openDirectOrOpenArgs(
+                app: terminal,
+                directArgs: ["-e", "/bin/zsh", "-lic", command],
+                openArgs: ["-e", "/bin/zsh", "-lic", command]
+            )
         case .alacritty:
-            try openWithOpenArgs(app: terminal, args: ["-e", "/bin/zsh", "-lc", command])
+            try openDirectOrOpenArgs(
+                app: terminal,
+                directArgs: ["-e", "/bin/zsh", "-lic", command],
+                openArgs: ["-e", "/bin/zsh", "-lic", command]
+            )
         case .kitty:
-            try openWithOpenArgs(app: terminal, args: ["/bin/zsh", "-lc", command])
+            try openDirectOrOpenArgs(
+                app: terminal,
+                directArgs: ["/bin/zsh", "-lic", command],
+                openArgs: ["/bin/zsh", "-lic", command]
+            )
         case .wezTerm:
-            try openWithOpenArgs(app: terminal, args: ["start", "--", "/bin/zsh", "-lc", command])
-        case .hyper, .tabby:
-            // Best-effort: open the app; GROK_HOME still comes from shell hook for new shells.
-            // Prefer a temp script when possible.
-            try openViaTempScript(app: terminal, command: command)
+            try openDirectOrOpenArgs(
+                app: terminal,
+                directArgs: ["start", "--", "/bin/zsh", "-lic", command],
+                openArgs: ["start", "--", "/bin/zsh", "-lic", command]
+            )
+        case .warp, .hyper, .tabby:
+            return try openBestEffort(app: terminal, profile: profile)
         }
+
+        if let warning = warnings.first {
+            return .launchedWithWarning(warning)
+        }
+        return .launched
     }
 
     // MARK: - Terminal.app
@@ -154,7 +232,7 @@ enum TerminalLauncher {
         let script = """
         tell application "Terminal"
             activate
-            do script "\(escapeForAppleScript(command))"
+            do script "\(ShellQuoting.appleScriptStringLiteral(command))"
         end tell
         """
         try runAppleScript(script)
@@ -163,13 +241,12 @@ enum TerminalLauncher {
     // MARK: - iTerm2
 
     private static func openInITerm(command: String) throws {
-        // Create a new window and run the command in its session.
         let script = """
         tell application "iTerm"
             activate
             set newWindow to (create window with default profile)
             tell current session of newWindow
-                write text "\(escapeForAppleScript(command))"
+                write text "\(ShellQuoting.appleScriptStringLiteral(command))"
             end tell
         end tell
         """
@@ -178,11 +255,9 @@ enum TerminalLauncher {
 
     // MARK: - Otty
 
-    /// Resolve Otty's control CLI (`otty-cli` inside the app, or `otty` on PATH).
     private static func resolveOttyCLI() -> URL? {
         if let appURL = TerminalApp.otty.resolvedAppURL() {
-            let bundled = appURL
-                .appendingPathComponent("Contents/MacOS/otty-cli")
+            let bundled = appURL.appendingPathComponent("Contents/MacOS/otty-cli")
             if FileManager.default.isExecutableFile(atPath: bundled.path) {
                 return bundled
             }
@@ -202,10 +277,84 @@ enum TerminalLauncher {
         guard let cli = resolveOttyCLI() else {
             throw LaunchError.appNotFound("Otty")
         }
-        // Otty CLI: `otty open --command '…'` launches a new window with that command.
+        try runProcess(executable: cli, arguments: ["open", "--command", command, "--quiet"])
+    }
+
+    // MARK: - Direct binary preferred
+
+    private static func openDirectOrOpenArgs(app: TerminalApp, directArgs: [String], openArgs: [String]) throws {
+        if let exe = app.resolvedExecutableURL() {
+            do {
+                try runProcess(executable: exe, arguments: directArgs)
+                return
+            } catch {
+                // Fall through to open(1).
+            }
+        }
+        try openWithOpenArgs(app: app, args: openArgs)
+    }
+
+    private static func openWithOpenArgs(app: TerminalApp, args: [String]) throws {
+        guard let appURL = app.resolvedAppURL() else {
+            throw LaunchError.appNotFound(app.displayName)
+        }
+
+        do {
+            try runProcess(
+                executable: URL(fileURLWithPath: "/usr/bin/open"),
+                arguments: ["-na", appURL.path, "--args"] + args
+            )
+        } catch {
+            try runProcess(
+                executable: URL(fileURLWithPath: "/usr/bin/open"),
+                arguments: ["-a", appURL.path, "--args"] + args
+            )
+        }
+    }
+
+    /// Warp / Hyper / Tabby: open the app only; GROK_HOME comes from shell hook for new shells.
+    private static func openBestEffort(app: TerminalApp, profile: Profile) throws -> LaunchOutcome {
+        guard let appURL = app.resolvedAppURL() else {
+            throw LaunchError.appNotFound(app.displayName)
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        let group = DispatchGroup()
+        var openError: Error?
+        group.enter()
+        NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, error in
+            openError = error
+            group.leave()
+        }
+        _ = group.wait(timeout: .now() + 5)
+        if let openError {
+            throw LaunchError.processFailed(openError.localizedDescription)
+        }
+        return .bestEffort(
+            "已打开 \(app.displayName)。该终端无法可靠注入启动命令；新 shell 将使用当前 active 的 GROK_HOME（\(profile.name)）。请手动运行 grok。"
+        )
+    }
+
+    // MARK: - Helpers
+
+    private static func resolveCwd(_ projectPath: String?) -> String? {
+        guard let raw = projectPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        let expanded = (raw as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir),
+              isDir.boolValue else {
+            return nil
+        }
+        return expanded
+    }
+
+    private static func runProcess(executable: URL, arguments: [String]) throws {
         let process = Process()
-        process.executableURL = cli
-        process.arguments = ["open", "--command", command, "--quiet"]
+        process.executableURL = executable
+        process.arguments = arguments
         let errPipe = Pipe()
         process.standardOutput = FileHandle.nullDevice
         process.standardError = errPipe
@@ -219,7 +368,7 @@ enum TerminalLauncher {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 let detail = (errText?.isEmpty == false)
                     ? errText!
-                    : "otty 退出码 \(process.terminationStatus)"
+                    : "进程退出码 \(process.terminationStatus)"
                 throw LaunchError.processFailed(detail)
             }
         } catch let error as LaunchError {
@@ -227,101 +376,6 @@ enum TerminalLauncher {
         } catch {
             throw LaunchError.processFailed(error.localizedDescription)
         }
-    }
-
-    // MARK: - open -na App --args …
-
-    private static func openWithOpenArgs(app: TerminalApp, args: [String]) throws {
-        guard let appURL = app.resolvedAppURL() else {
-            throw LaunchError.appNotFound(app.displayName)
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        // -n: new instance/window path; -a: application
-        process.arguments = ["-na", appURL.path, "--args"] + args
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus != 0 {
-                // Some apps ignore -n; retry without -n.
-                try openWithOpenArgsRetry(appURL: appURL, args: args)
-            }
-        } catch {
-            throw LaunchError.processFailed(error.localizedDescription)
-        }
-    }
-
-    private static func openWithOpenArgsRetry(appURL: URL, args: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-a", appURL.path, "--args"] + args
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus != 0 {
-            throw LaunchError.processFailed("open 退出码 \(process.terminationStatus)")
-        }
-    }
-
-    // MARK: - Temp script fallback
-
-    private static func openViaTempScript(app: TerminalApp, command: String) throws {
-        guard let appURL = app.resolvedAppURL() else {
-            throw LaunchError.appNotFound(app.displayName)
-        }
-
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("grokswitch-\(UUID().uuidString).command")
-        let scriptBody = """
-        #!/bin/zsh
-        \(command)
-
-        """
-        try scriptBody.write(to: tmp, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: tmp.path
-        )
-
-        // Opening a .command file typically uses Terminal; for other apps, open the app
-        // and hope the user has shell hook. Prefer running zsh -lc via open when possible.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-na", appURL.path, "--args", "-e", "/bin/zsh", tmp.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus != 0 {
-                // Last resort: open Terminal with the script (macOS runs .command in Terminal).
-                NSWorkspace.shared.open(tmp)
-            }
-        } catch {
-            NSWorkspace.shared.open(tmp)
-        }
-    }
-
-    // MARK: - Helpers
-
-    /// Returns ` --cwd '…'` when a valid project path is set, otherwise empty.
-    private static func cwdArgument(_ projectPath: String?) -> String {
-        guard let raw = projectPath?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else {
-            return ""
-        }
-        let expanded = (raw as NSString).expandingTildeInPath
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir),
-              isDir.boolValue else {
-            return ""
-        }
-        return " --cwd \(shellEscape(expanded))"
     }
 
     private static func runAppleScript(_ source: String) throws {
@@ -334,16 +388,5 @@ enum TerminalLauncher {
             let message = error[NSAppleScript.errorMessage] as? String ?? "AppleScript 执行失败"
             throw LaunchError.scriptFailed(message)
         }
-    }
-
-    private static func shellEscape(_ value: String) -> String {
-        // Single-quote shell escaping
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    private static func escapeForAppleScript(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }

@@ -88,7 +88,8 @@ struct AppConfig: Codable, Equatable {
         version = try c.decode(Int.self, forKey: .version)
         activeProfileID = try c.decodeIfPresent(String.self, forKey: .activeProfileID)
         profiles = try c.decode([Profile].self, forKey: .profiles)
-        showEmailInMenuBar = try c.decodeIfPresent(Bool.self, forKey: .showEmailInMenuBar) ?? true
+        // Match .empty / seed defaults: menu bar stays compact unless user opts in.
+        showEmailInMenuBar = try c.decodeIfPresent(Bool.self, forKey: .showEmailInMenuBar) ?? false
         showUsageInMenuBar = try c.decodeIfPresent(Bool.self, forKey: .showUsageInMenuBar) ?? true
         preferredTerminal = try c.decodeIfPresent(String.self, forKey: .preferredTerminal)
             ?? TerminalApp.terminal.rawValue
@@ -166,6 +167,9 @@ enum ProjectScanner {
         return existingDirectory(expanding: configured) != nil
     }
 
+    /// Soft cap so huge scan roots do not freeze the menu bar on the main thread.
+    static let maxListedProjects = 400
+
     /// List immediate subdirectories under the resolved scan root (non-hidden, folders only).
     static func scan(configuredRoot: String? = nil) -> [ProjectFolder] {
         guard let root = resolveRoot(configured: configuredRoot) else {
@@ -174,7 +178,7 @@ enum ProjectScanner {
         let fm = FileManager.default
         guard let contents = try? fm.contentsOfDirectory(
             at: root,
-            includingPropertiesForKeys: [.isDirectoryKey, .isHiddenKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .isHiddenKey, .isSymbolicLinkKey],
             options: [.skipsHiddenFiles]
         ) else {
             return []
@@ -185,7 +189,10 @@ enum ProjectScanner {
             guard isDirectory(url) else { continue }
             let name = url.lastPathComponent
             if name.hasPrefix(".") { continue }
+            // Skip .app bundles as project candidates.
+            if name.hasSuffix(".app") { continue }
             folders.append(ProjectFolder(name: name, path: url.path))
+            if folders.count >= maxListedProjects { break }
         }
         return folders.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending

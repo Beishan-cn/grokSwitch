@@ -7,9 +7,12 @@ final class ProfileStore: ObservableObject {
     @Published private(set) var config: AppConfig
     @Published private(set) var identities: [String: AccountIdentity] = [:]
     @Published private(set) var usages: [String: ProfileUsage] = [:]
-    @Published var lastError: String?
-    @Published var statusMessage: String?
+    @Published private(set) var lastError: String?
+    @Published private(set) var statusMessage: String?
     @Published private(set) var isRefreshingUsage = false
+
+    /// When true, config file was unreadable; refuse writes that would overwrite it.
+    private var configWriteBlocked = false
 
     private let fm = FileManager.default
     private let encoder: JSONEncoder = {
@@ -30,7 +33,14 @@ final class ProfileStore: ObservableObject {
     private static let usageFreshness: TimeInterval = 5 * 60
 
     private var usageRefreshTask: Task<Void, Never>?
+    private var usageRefreshGeneration: UInt64 = 0
     private var usageTimer: Timer?
+
+    private enum ConfigLoadResult {
+        case missing
+        case loaded(AppConfig)
+        case unreadable(Error)
+    }
 
     init() {
         self.config = .empty
@@ -74,18 +84,53 @@ final class ProfileStore: ObservableObject {
         return ""
     }
 
+    /// Set a status line; optionally clear lastError.
+    func noteStatus(_ message: String?, clearError: Bool = true) {
+        statusMessage = message
+        if clearError {
+            lastError = nil
+        }
+    }
+
     func reload() {
         ensureDirectories()
-        config = loadConfig()
-        if config.profiles.isEmpty {
+        applySecurePermissionsBestEffort()
+
+        switch loadConfig() {
+        case .missing:
+            configWriteBlocked = false
+            config = .empty
             seedDefaultProfileFromExistingGrokHome()
-            config = loadConfig()
+        case let .loaded(cfg):
+            configWriteBlocked = false
+            var fixed = sanitizeLoadedConfig(cfg)
+            // Heal dangling activeProfileID.
+            if let active = fixed.activeProfileID,
+               !fixed.profiles.contains(where: { $0.id == active })
+            {
+                fixed.activeProfileID = fixed.profiles.first?.id
+                if let healed = try? commitConfigReturning(fixed) {
+                    fixed = healed
+                }
+            }
+            config = fixed
+        case let .unreadable(error):
+            configWriteBlocked = true
+            // Keep in-memory empty/previous; never seed-overwrite a corrupt file.
+            lastError = "读取配置失败：\(error.localizedDescription)。已保留原文件，未覆盖。请修复或删除 ~/.grokswitch/config.json 后点「刷新」。"
+            statusMessage = nil
+            refreshIdentities()
+            return
         }
+
         refreshIdentities()
-        // Keep env hook in sync with active profile
         if let active = activeProfile {
-            try? writeActiveEnv(for: active)
-            _ = ShellHook.ensureInstalled()
+            do {
+                try writeActiveEnv(for: active)
+            } catch {
+                lastError = "写入 active.env 失败：\(error.localizedDescription)"
+            }
+            reportHookResult(ShellHook.ensureInstalled())
         }
         refreshUsage(force: false)
     }
@@ -102,27 +147,43 @@ final class ProfileStore: ObservableObject {
     /// - Parameter force: ignore freshness cache and re-fetch everything.
     func refreshUsage(force: Bool = true) {
         usageRefreshTask?.cancel()
+        usageRefreshGeneration &+= 1
+        let generation = usageRefreshGeneration
         usageRefreshTask = Task { [weak self] in
-            await self?.performUsageRefresh(force: force)
+            await self?.performUsageRefresh(force: force, generation: generation)
         }
     }
 
     @discardableResult
     func switchTo(profileID: String) -> Bool {
+        guard !configWriteBlocked else {
+            lastError = "配置文件损坏，无法切换账号。请先修复 config.json。"
+            return false
+        }
         guard let profile = config.profiles.first(where: { $0.id == profileID }) else {
             lastError = "找不到账号配置"
             return false
         }
-        config.activeProfileID = profile.id
+        guard Paths.isManagedProfileHome(profile.homePath) else {
+            lastError = "账号路径非法，已拒绝切换"
+            return false
+        }
+
+        var draft = config
+        draft.activeProfileID = profile.id
         do {
-            try saveConfig()
-            try writeActiveEnv(for: profile)
-            _ = ShellHook.ensureInstalled()
+            try commitConfig(draft)
+            config = draft
+            do {
+                try writeActiveEnv(for: profile)
+                lastError = nil
+            } catch {
+                lastError = "已切换账号配置，但 active.env 写入失败：\(error.localizedDescription)"
+            }
+            reportHookResult(ShellHook.ensureInstalled(), preferExistingError: lastError != nil)
             refreshIdentities()
-            // Ensure this profile's usage is loaded promptly when switching.
             refreshUsage(force: false)
             statusMessage = "已切换到 \(profile.name)。新开终端生效。"
-            lastError = nil
             return true
         } catch {
             lastError = "切换失败：\(error.localizedDescription)"
@@ -130,8 +191,13 @@ final class ProfileStore: ObservableObject {
         }
     }
 
+    /// Create a profile. When `activate` is true, set it active in the same commit.
     @discardableResult
-    func addProfile(name: String) -> Profile? {
+    func addProfile(name: String, activate: Bool = false) -> Profile? {
+        guard !configWriteBlocked else {
+            lastError = "配置文件损坏，无法添加账号。"
+            return nil
+        }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             lastError = "名称不能为空"
@@ -141,33 +207,59 @@ final class ProfileStore: ObservableObject {
         let slug = slugify(trimmed)
         var id = slug
         var n = 2
-        while config.profiles.contains(where: { $0.id == id }) {
+        while config.profiles.contains(where: { $0.id == id })
+            || fm.fileExists(atPath: Paths.profileHome(id: id).path)
+        {
             id = "\(slug)-\(n)"
             n += 1
         }
 
         let home = Paths.profileHome(id: id)
+        var createdDirectory = false
         do {
-            try fm.createDirectory(at: home, withIntermediateDirectories: true)
+            if !fm.fileExists(atPath: home.path) {
+                try fm.createDirectory(at: home, withIntermediateDirectories: true)
+                createdDirectory = true
+                Paths.ensureSecureDirectory(home)
+            }
             let profile = Profile(
                 id: id,
                 name: trimmed,
                 homePath: home.path,
                 createdAt: Date()
             )
-            config.profiles.append(profile)
-            if config.activeProfileID == nil {
-                config.activeProfileID = profile.id
-                try writeActiveEnv(for: profile)
-                _ = ShellHook.ensureInstalled()
+            var draft = config
+            draft.profiles.append(profile)
+            let shouldActivate = activate || draft.activeProfileID == nil
+            if shouldActivate {
+                draft.activeProfileID = profile.id
             }
-            try saveConfig()
+
+            try commitConfig(draft)
+            config = draft
+
+            if shouldActivate {
+                do {
+                    try writeActiveEnv(for: profile)
+                } catch {
+                    lastError = "已创建账号，但 active.env 写入失败：\(error.localizedDescription)"
+                }
+                reportHookResult(ShellHook.ensureInstalled(), preferExistingError: lastError != nil)
+            }
+
             refreshIdentities()
             usages[profile.id] = .notLoggedIn()
-            statusMessage = "已创建「\(trimmed)」。打开终端后运行 grok login。"
-            lastError = nil
+            if lastError == nil {
+                statusMessage = "已创建「\(trimmed)」。打开终端后运行 grok login。"
+                lastError = nil
+            } else {
+                statusMessage = "已创建「\(trimmed)」"
+            }
             return profile
         } catch {
+            if createdDirectory {
+                try? fm.removeItem(at: home)
+            }
             lastError = "创建失败：\(error.localizedDescription)"
             return nil
         }
@@ -175,6 +267,10 @@ final class ProfileStore: ObservableObject {
 
     @discardableResult
     func renameProfile(id: String, name: String) -> Bool {
+        guard !configWriteBlocked else {
+            lastError = "配置文件损坏，无法重命名。"
+            return false
+        }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             lastError = "名称不能为空"
@@ -188,10 +284,11 @@ final class ProfileStore: ObservableObject {
             lastError = nil
             return true
         }
-        config.profiles[index].name = trimmed
+        var draft = config
+        draft.profiles[index].name = trimmed
         do {
-            try saveConfig()
-            objectWillChange.send()
+            try commitConfig(draft)
+            config = draft
             statusMessage = "已重命名为「\(trimmed)」"
             lastError = nil
             return true
@@ -203,8 +300,13 @@ final class ProfileStore: ObservableObject {
 
     /// Remove a profile from config and delete its GROK_HOME directory.
     /// Refuses when it is the only remaining account.
+    /// Returns true if the registry no longer contains the profile (disk config committed).
     @discardableResult
     func deleteProfile(id: String) -> Bool {
+        guard !configWriteBlocked else {
+            lastError = "配置文件损坏，无法删除账号。"
+            return false
+        }
         guard config.profiles.count > 1 else {
             lastError = "至少保留一个账号"
             return false
@@ -214,54 +316,73 @@ final class ProfileStore: ObservableObject {
             return false
         }
 
+        // Cancel in-flight usage so ghost writes cannot repopulate deleted keys.
+        usageRefreshTask?.cancel()
+        usageRefreshGeneration &+= 1
+
         let profile = config.profiles[index]
         let wasActive = config.activeProfileID == profile.id
-        let previousConfig = config
-        let previousIdentities = identities
-        let previousUsages = usages
+        let homePath = profile.homePath
+        let canDeleteHome = Paths.isManagedProfileHome(homePath)
 
-        config.profiles.remove(at: index)
-        identities.removeValue(forKey: id)
-        usages.removeValue(forKey: id)
-
+        var draft = config
+        draft.profiles.remove(at: index)
         if wasActive {
-            config.activeProfileID = config.profiles.first?.id
+            draft.activeProfileID = draft.profiles.first?.id
         }
 
         do {
-            try saveConfig()
-            if wasActive, let fallback = activeProfile {
-                try writeActiveEnv(for: fallback)
-                _ = ShellHook.ensureInstalled()
-            }
+            try commitConfig(draft)
         } catch {
-            config = previousConfig
-            identities = previousIdentities
-            usages = previousUsages
             lastError = "删除失败：\(error.localizedDescription)"
             return false
         }
 
-        var dataWarning: String?
-        if fm.fileExists(atPath: profile.homeURL.path) {
+        // Config is source of truth after successful save — do not roll memory back.
+        config = draft
+        identities.removeValue(forKey: id)
+        usages.removeValue(forKey: id)
+        // Drop any other orphan usage keys.
+        let validIDs = Set(config.profiles.map(\.id))
+        usages = usages.filter { validIDs.contains($0.key) }
+        identities = identities.filter { validIDs.contains($0.key) }
+
+        var warnings: [String] = []
+
+        if wasActive, let fallback = activeProfile {
             do {
-                try fm.removeItem(at: profile.homeURL)
+                try writeActiveEnv(for: fallback)
             } catch {
-                dataWarning = "账号已移除，但本地目录删除失败：\(error.localizedDescription)"
+                warnings.append("active.env 写入失败：\(error.localizedDescription)")
+            }
+            if case let .failed(message) = ShellHook.ensureInstalled() {
+                warnings.append(message)
             }
         }
 
-        if let dataWarning {
-            statusMessage = nil
-            lastError = dataWarning
-        } else if wasActive, let fallback = activeProfile {
-            statusMessage = "已删除「\(profile.name)」，已切换到 \(fallback.name)"
+        if canDeleteHome, fm.fileExists(atPath: profile.homeURL.path) {
+            do {
+                try fm.removeItem(at: profile.homeURL)
+            } catch {
+                warnings.append("本地目录删除失败：\(error.localizedDescription)")
+            }
+        } else if !canDeleteHome {
+            warnings.append("homePath 不在托管目录内，已从列表移除但未删除磁盘目录")
+        }
+
+        if warnings.isEmpty {
+            if wasActive, let fallback = activeProfile {
+                statusMessage = "已删除「\(profile.name)」，已切换到 \(fallback.name)"
+            } else {
+                statusMessage = "已删除「\(profile.name)」"
+            }
             lastError = nil
         } else {
             statusMessage = "已删除「\(profile.name)」"
-            lastError = nil
+            lastError = "账号已从配置移除，但：" + warnings.joined(separator: "；")
         }
-        objectWillChange.send()
+
+        refreshUsage(force: false)
         return true
     }
 
@@ -271,27 +392,34 @@ final class ProfileStore: ObservableObject {
             lastError = "没有可用账号"
             return
         }
+        guard Paths.isManagedProfileHome(target.homePath) else {
+            lastError = "账号路径非法，已拒绝打开终端"
+            return
+        }
         let terminal = config.preferredTerminalApp
         let project = config.preferredProjectPath
         do {
-            try TerminalLauncher.open(profile: target, terminal: terminal, projectPath: project)
-            if let project, !project.isEmpty {
-                let name = (project as NSString).lastPathComponent
-                statusMessage = "已用 \(terminal.displayName) 打开：\(target.name) · \(name)"
-            } else {
-                statusMessage = "已用 \(terminal.displayName) 打开：\(target.name)"
-            }
-            lastError = nil
+            let outcome = try TerminalLauncher.open(
+                profile: target,
+                terminal: terminal,
+                projectPath: project
+            )
+            applyLaunchOutcome(outcome, profile: target, terminal: terminal, projectPath: project)
         } catch {
-            lastError = "打开终端失败：\(error.localizedDescription)"
+            // Keep prior errors (e.g. env write from add/switch) and append launch failure.
+            lastError = mergeError(
+                existing: lastError,
+                additional: "打开终端失败：\(error.localizedDescription)"
+            )
         }
     }
 
     func setPreferredTerminal(_ terminal: TerminalApp) {
-        config.preferredTerminal = terminal.rawValue
+        var draft = config
+        draft.preferredTerminal = terminal.rawValue
         do {
-            try saveConfig()
-            objectWillChange.send()
+            try commitConfig(draft)
+            config = draft
             statusMessage = "默认终端已设为 \(terminal.displayName)"
             lastError = nil
         } catch {
@@ -307,10 +435,18 @@ final class ProfileStore: ObservableObject {
         } else {
             normalized = nil
         }
-        config.preferredProjectPath = normalized
+        if let normalized {
+            var isDir: ObjCBool = false
+            if !fm.fileExists(atPath: normalized, isDirectory: &isDir) || !isDir.boolValue {
+                lastError = "项目路径不存在或不是文件夹"
+                return
+            }
+        }
+        var draft = config
+        draft.preferredProjectPath = normalized
         do {
-            try saveConfig()
-            objectWillChange.send()
+            try commitConfig(draft)
+            config = draft
             if let path = normalized {
                 let name = (path as NSString).lastPathComponent
                 statusMessage = "默认项目已设为 \(name)"
@@ -332,10 +468,18 @@ final class ProfileStore: ObservableObject {
         } else {
             normalized = nil
         }
-        config.projectsScanRoot = normalized
+        if let normalized {
+            var isDir: ObjCBool = false
+            if !fm.fileExists(atPath: normalized, isDirectory: &isDir) || !isDir.boolValue {
+                lastError = "扫描目录不存在或不是文件夹"
+                return
+            }
+        }
+        var draft = config
+        draft.projectsScanRoot = normalized
         do {
-            try saveConfig()
-            objectWillChange.send()
+            try commitConfig(draft)
+            config = draft
             if let path = normalized {
                 statusMessage = "项目扫描目录已设为 \(ProjectScanner.displayPath(for: URL(fileURLWithPath: path)))"
             } else {
@@ -349,20 +493,24 @@ final class ProfileStore: ObservableObject {
     }
 
     func setShowEmailInMenuBar(_ value: Bool) {
-        config.showEmailInMenuBar = value
+        var draft = config
+        draft.showEmailInMenuBar = value
         do {
-            try saveConfig()
-            objectWillChange.send()
+            try commitConfig(draft)
+            config = draft
+            lastError = nil
         } catch {
             lastError = "保存设置失败：\(error.localizedDescription)"
         }
     }
 
     func setShowUsageInMenuBar(_ value: Bool) {
-        config.showUsageInMenuBar = value
+        var draft = config
+        draft.showUsageInMenuBar = value
         do {
-            try saveConfig()
-            objectWillChange.send()
+            try commitConfig(draft)
+            config = draft
+            lastError = nil
         } catch {
             lastError = "保存设置失败：\(error.localizedDescription)"
         }
@@ -377,22 +525,36 @@ final class ProfileStore: ObservableObject {
                 self?.refreshUsage(force: true)
             }
         }
-        // Allow UI to stay responsive while timer fires.
         RunLoop.main.add(timer, forMode: .common)
         usageTimer = timer
     }
 
-    private func performUsageRefresh(force: Bool) async {
+    private func performUsageRefresh(force: Bool, generation: UInt64) async {
         let profiles = config.profiles
         guard !profiles.isEmpty else { return }
+        guard generation == usageRefreshGeneration else { return }
 
         isRefreshingUsage = true
-        defer { isRefreshingUsage = false }
+        defer {
+            if generation == usageRefreshGeneration {
+                isRefreshingUsage = false
+            }
+        }
 
-        // Mark profiles that will be fetched as loading (keep stale ready values visible).
         for profile in profiles {
+            guard generation == usageRefreshGeneration else { return }
             let current = usages[profile.id]
             let identity = identities[profile.id] ?? AuthReader.identity(at: profile.authURL)
+            // Broken auth.json → failed (not “未登录”).
+            if let issue = identity.authIssue {
+                switch issue {
+                case .notFound:
+                    usages[profile.id] = .notLoggedIn()
+                case .unreadable, .missingTokens:
+                    usages[profile.id] = .failed(issue.usageFailureMessage)
+                }
+                continue
+            }
             if !identity.isLoggedIn {
                 usages[profile.id] = .notLoggedIn()
                 continue
@@ -409,7 +571,6 @@ final class ProfileStore: ObservableObject {
             {
                 continue
             }
-            // Keep last ready value while loading so the UI doesn't flash "…".
             if current?.status != .ready {
                 usages[profile.id] = .loading()
             }
@@ -418,6 +579,8 @@ final class ProfileStore: ObservableObject {
         await withTaskGroup(of: (String, ProfileUsage).self) { group in
             for profile in profiles {
                 let identity = identities[profile.id] ?? AuthReader.identity(at: profile.authURL)
+                // Skip fetch when auth file is missing/broken or session expired.
+                if identity.authIssue != nil { continue }
                 guard identity.isLoggedIn, !identity.isExpired else { continue }
 
                 if !force,
@@ -445,60 +608,154 @@ final class ProfileStore: ObservableObject {
             }
 
             for await (profileID, usage) in group {
-                if Task.isCancelled { break }
+                guard generation == usageRefreshGeneration, !Task.isCancelled else { break }
+                guard config.profiles.contains(where: { $0.id == profileID }) else { continue }
                 usages[profileID] = usage
             }
         }
 
-        // Force menu bar title recompute.
-        objectWillChange.send()
+        if generation == usageRefreshGeneration {
+            objectWillChange.send()
+        }
     }
 
-    // MARK: - Private
+    // MARK: - Private: config load / commit
 
     private func ensureDirectories() {
-        try? fm.createDirectory(at: Paths.profilesRoot, withIntermediateDirectories: true)
+        Paths.ensureSecureDirectory(Paths.grokSwitchRoot)
+        Paths.ensureSecureDirectory(Paths.profilesRoot)
     }
 
-    private func loadConfig() -> AppConfig {
+    private func applySecurePermissionsBestEffort() {
+        Paths.ensureSecureDirectory(Paths.grokSwitchRoot)
+        Paths.ensureSecureDirectory(Paths.profilesRoot)
+        Paths.ensureSecureFile(Paths.configFile)
+        Paths.ensureSecureFile(Paths.activeEnvFile)
+        for profile in config.profiles {
+            Paths.ensureSecureDirectory(profile.homeURL)
+            Paths.ensureSecureFile(profile.authURL)
+        }
+    }
+
+    private func loadConfig() -> ConfigLoadResult {
         guard fm.fileExists(atPath: Paths.configFile.path) else {
-            return .empty
+            return .missing
         }
         do {
             let data = try Data(contentsOf: Paths.configFile)
             var cfg = try decoder.decode(AppConfig.self, from: data)
-            // Normalize home paths that may use ~
             cfg.profiles = cfg.profiles.map { p in
                 var copy = p
                 copy.homePath = (p.homePath as NSString).expandingTildeInPath
                 return copy
             }
-            return cfg
+            return .loaded(cfg)
         } catch {
-            lastError = "读取配置失败：\(error.localizedDescription)"
-            return .empty
+            return .unreadable(error)
         }
     }
 
-    private func saveConfig() throws {
+    /// Drop profiles whose homePath is outside the managed root; repair active id.
+    private func sanitizeLoadedConfig(_ cfg: AppConfig) -> AppConfig {
+        var next = cfg
+        let before = next.profiles.count
+        next.profiles = next.profiles.filter { Paths.isManagedProfileHome($0.homePath) }
+        if next.profiles.count < before {
+            lastError = "配置中存在非法 homePath，已忽略 \(before - next.profiles.count) 个账号"
+        }
+        if let active = next.activeProfileID,
+           !next.profiles.contains(where: { $0.id == active })
+        {
+            next.activeProfileID = next.profiles.first?.id
+        }
+        return next
+    }
+
+    private func commitConfig(_ cfg: AppConfig) throws {
+        _ = try commitConfigReturning(cfg)
+    }
+
+    @discardableResult
+    private func commitConfigReturning(_ cfg: AppConfig) throws -> AppConfig {
+        guard !configWriteBlocked else {
+            throw NSError(
+                domain: "GrokSwitch",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "配置文件损坏，拒绝写入以免覆盖"]
+            )
+        }
         ensureDirectories()
-        let data = try encoder.encode(config)
+        let data = try encoder.encode(cfg)
         try data.write(to: Paths.configFile, options: .atomic)
+        Paths.ensureSecureFile(Paths.configFile)
+        return cfg
     }
 
     private func writeActiveEnv(for profile: Profile) throws {
         ensureDirectories()
-        let homePath = profile.homeURL.path
+        guard Paths.isManagedProfileHome(profile.homePath) else {
+            throw NSError(
+                domain: "GrokSwitch",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "homePath 不在托管 profiles 目录内"]
+            )
+        }
+        let homePath = profile.homeURL.standardizedFileURL.path
         let content = """
         # Generated by GrokSwitch — do not edit by hand
-        export GROK_HOME="\(homePath)"
+        export GROK_HOME=\(ShellQuoting.shellSingleQuoted(homePath))
 
         """
         try content.write(to: Paths.activeEnvFile, atomically: true, encoding: .utf8)
+        Paths.ensureSecureFile(Paths.activeEnvFile)
     }
 
     private func bootstrapIfNeeded() {
         ensureDirectories()
+    }
+
+    private func reportHookResult(_ result: ShellHook.InstallResult, preferExistingError: Bool = false) {
+        if case let .failed(message) = result {
+            if !preferExistingError || lastError == nil {
+                lastError = message
+            }
+        }
+    }
+
+    private func applyLaunchOutcome(
+        _ outcome: TerminalLauncher.LaunchOutcome,
+        profile: Profile,
+        terminal: TerminalApp,
+        projectPath: String?
+    ) {
+        let projectName: String? = {
+            guard let projectPath, !projectPath.isEmpty else { return nil }
+            return (projectPath as NSString).lastPathComponent
+        }()
+        let successStatus: String = {
+            if let projectName {
+                return "已用 \(terminal.displayName) 打开：\(profile.name) · \(projectName)"
+            }
+            return "已用 \(terminal.displayName) 打开：\(profile.name)"
+        }()
+        switch outcome {
+        case .launched:
+            statusMessage = successStatus
+            // Preserve prior lastError (e.g. active.env partial failure from confirmAdd / switch).
+        case let .launchedWithWarning(warning):
+            statusMessage = successStatus
+            lastError = mergeError(existing: lastError, additional: warning)
+        case let .bestEffort(message):
+            statusMessage = message
+            // Preserve prior lastError; best-effort is not a full clean success.
+        }
+    }
+
+    /// Append a secondary warning without dropping an earlier failure message.
+    private func mergeError(existing: String?, additional: String) -> String {
+        guard let existing, !existing.isEmpty else { return additional }
+        if existing.contains(additional) { return existing }
+        return "\(existing)；\(additional)"
     }
 
     /// First-run: import current ~/.grok state into a "default" profile if auth exists.
@@ -506,16 +763,16 @@ final class ProfileStore: ObservableObject {
         let source = Paths.defaultGrokHome
         let auth = source.appendingPathComponent("auth.json")
         guard fm.fileExists(atPath: auth.path) else {
-            // Create an empty default profile so UI isn't blank
             let home = Paths.profileHome(id: "default")
             try? fm.createDirectory(at: home, withIntermediateDirectories: true)
+            Paths.ensureSecureDirectory(home)
             let profile = Profile(
                 id: "default",
                 name: "默认",
                 homePath: home.path,
                 createdAt: Date()
             )
-            config = AppConfig(
+            let seeded = AppConfig(
                 version: AppConfig.currentVersion,
                 activeProfileID: profile.id,
                 profiles: [profile],
@@ -523,9 +780,14 @@ final class ProfileStore: ObservableObject {
                 showUsageInMenuBar: true,
                 preferredTerminal: TerminalApp.terminal.rawValue
             )
-            try? saveConfig()
-            try? writeActiveEnv(for: profile)
-            _ = ShellHook.ensureInstalled()
+            do {
+                try commitConfig(seeded)
+                config = seeded
+                try writeActiveEnv(for: profile)
+                reportHookResult(ShellHook.ensureInstalled())
+            } catch {
+                lastError = "创建默认账号失败：\(error.localizedDescription)"
+            }
             return
         }
 
@@ -534,7 +796,7 @@ final class ProfileStore: ObservableObject {
             if !fm.fileExists(atPath: dest.path) {
                 try fm.createDirectory(at: dest, withIntermediateDirectories: true)
             }
-            // Copy identity + settings; leave binary install at ~/.grok alone.
+            Paths.ensureSecureDirectory(dest)
             let filesToCopy = [
                 "auth.json",
                 "config.toml",
@@ -549,11 +811,10 @@ final class ProfileStore: ObservableObject {
                     try fm.removeItem(at: to)
                 }
                 try fm.copyItem(at: from, to: to)
+                if name == "auth.json" {
+                    Paths.ensureSecureFile(to)
+                }
             }
-
-            // Sessions can be huge; do not block first launch by copying them.
-            // Users can still open historical sessions from the original ~/.grok
-            // if needed. New sessions will live under this profile home.
 
             let profile = Profile(
                 id: "default",
@@ -561,7 +822,7 @@ final class ProfileStore: ObservableObject {
                 homePath: dest.path,
                 createdAt: Date()
             )
-            config = AppConfig(
+            let seeded = AppConfig(
                 version: AppConfig.currentVersion,
                 activeProfileID: profile.id,
                 profiles: [profile],
@@ -569,10 +830,12 @@ final class ProfileStore: ObservableObject {
                 showUsageInMenuBar: true,
                 preferredTerminal: TerminalApp.terminal.rawValue
             )
-            try saveConfig()
+            try commitConfig(seeded)
+            config = seeded
             try writeActiveEnv(for: profile)
-            _ = ShellHook.ensureInstalled()
+            reportHookResult(ShellHook.ensureInstalled())
             statusMessage = "已从 ~/.grok 导入默认账号"
+            lastError = nil
         } catch {
             lastError = "导入默认账号失败：\(error.localizedDescription)"
         }
