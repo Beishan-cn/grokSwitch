@@ -285,7 +285,9 @@ enum TerminalLauncher {
     private static func openDirectOrOpenArgs(app: TerminalApp, directArgs: [String], openArgs: [String]) throws {
         if let exe = app.resolvedExecutableURL() {
             do {
-                try runProcess(executable: exe, arguments: directArgs)
+                // Ghostty / Alacritty / Kitty / WezTerm stay alive for the window lifetime.
+                // Never waitUntilExit on the main thread — that freezes the whole app.
+                try runProcess(executable: exe, arguments: directArgs, waitForExit: false)
                 return
             } catch {
                 // Fall through to open(1).
@@ -300,14 +302,17 @@ enum TerminalLauncher {
         }
 
         do {
+            // open(1) returns once the app is asked to launch — safe to wait.
             try runProcess(
                 executable: URL(fileURLWithPath: "/usr/bin/open"),
-                arguments: ["-na", appURL.path, "--args"] + args
+                arguments: ["-na", appURL.path, "--args"] + args,
+                waitForExit: true
             )
         } catch {
             try runProcess(
                 executable: URL(fileURLWithPath: "/usr/bin/open"),
-                arguments: ["-a", appURL.path, "--args"] + args
+                arguments: ["-a", appURL.path, "--args"] + args,
+                waitForExit: true
             )
         }
     }
@@ -319,17 +324,8 @@ enum TerminalLauncher {
         }
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
-        let group = DispatchGroup()
-        var openError: Error?
-        group.enter()
-        NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, error in
-            openError = error
-            group.leave()
-        }
-        _ = group.wait(timeout: .now() + 5)
-        if let openError {
-            throw LaunchError.processFailed(openError.localizedDescription)
-        }
+        // Fire-and-forget: blocking on the open callback freezes Settings / MenuBar on the main actor.
+        NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, _ in }
         return .bestEffort(
             "已打开 \(app.displayName)。该终端无法可靠注入启动命令；新 shell 将使用当前 active 的 GROK_HOME（\(profile.name)）。请手动运行 grok。"
         )
@@ -351,7 +347,13 @@ enum TerminalLauncher {
         return expanded
     }
 
-    private static func runProcess(executable: URL, arguments: [String]) throws {
+    /// - Parameter waitForExit: When false, only waits briefly for immediate spawn failure.
+    ///   Long-lived terminal GUIs (Ghostty etc.) must use false — waiting blocks until the window closes.
+    private static func runProcess(
+        executable: URL,
+        arguments: [String],
+        waitForExit: Bool = true
+    ) throws {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -361,7 +363,18 @@ enum TerminalLauncher {
 
         do {
             try process.run()
-            process.waitUntilExit()
+            if waitForExit {
+                process.waitUntilExit()
+            } else {
+                // Catch bad argv / missing dylib without owning the terminal session.
+                let deadline = Date().addingTimeInterval(0.25)
+                while process.isRunning, Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.02)
+                }
+                if process.isRunning {
+                    return
+                }
+            }
             if process.terminationStatus != 0 {
                 let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                 let errText = String(data: errData, encoding: .utf8)?
