@@ -4,11 +4,11 @@ macOS 菜单栏工具：用官方 `GROK_HOME` 隔离多 Grok 账号，一键切�
 
 ## 功能（MVP）
 
-- 菜单栏显示当前账号短名 + **剩余用量**（如 `G·antony.beishan 99%`）
-- 账号列表旁显示各 profile 的剩余额度，切换账号时一目了然
+- 菜单栏显示 **Grok 图标 + 剩余用量**（如 `99%`）；可选在无用量时显示账号短名
+- 账号列表旁显示各 profile 的剩余额度与重置时间
 - 点击切换账号（更新 active `GROK_HOME`）
-- 新开终端自动生效（写入 `~/.zshrc` hook + `~/.grokswitch/active.env`）
-- 用当前账号打开终端并启动 `grok`（可在设置中选择默认终端：Terminal / iTerm2 / Ghostty / Otty / Warp 等）
+- 新开 **zsh** 终端自动生效（写入 `~/.zshrc` hook + `~/.grokswitch/active.env`）
+- 用当前账号打开终端并启动 `grok`（可选择 Terminal / iTerm2 / Ghostty / Otty / Warp 等）
 - 添加新账号 profile（打开终端后 `grok login`）
 - 首次启动从现有 `~/.grok` 导入默认账号
 - 用量：用各账号 `auth.json` 的 Bearer 调用 grok.com 账单接口（与 CodexBar 同源），约每 10 分钟自动刷新
@@ -23,11 +23,11 @@ GROK_HOME=~/.grokswitch/profiles/work     grok
 
 Grok 官方支持 `GROK_HOME` 覆盖配置目录；各 home 内 `auth.json` / `config.toml` / `sessions` 互不干扰。
 
-二进制仍使用官方安装路径 `~/.grok/bin/grok`（不随 profile 切换）。
+二进制优先使用 `~/.grok/bin/grok`，其次常见 PATH 位置（不随 profile 切换）。
 
 ## 要求
 
-- macOS 14+
+- macOS 14+ **Apple Silicon (arm64)**
 - 已安装 [Grok Build CLI](https://x.ai/cli)
 - Xcode Command Line Tools / Swift 5.9+
 
@@ -52,8 +52,8 @@ cp -R .build/GrokSwitch.app /Applications/
 
 ```
 ~/.grokswitch/
-  config.json       # profile 列表与当前激活 id
-  active.env        # export GROK_HOME=...
+  config.json       # profile 列表与当前激活 id（权限 0600）
+  active.env        # export GROK_HOME='…'（shell 安全转义）
   profiles/
     default/        # 导入的默认账号
     work/           # 你添加的其它账号
@@ -63,19 +63,36 @@ cp -R .build/GrokSwitch.app /Applications/
 
 ```bash
 # >>> grokswitch >>>
+# GrokSwitch: apply active GROK_HOME for new shells (zsh only)
 if [ -f "$HOME/.grokswitch/active.env" ]; then
   . "$HOME/.grokswitch/active.env"
 fi
 # <<< grokswitch <<<
 ```
 
+### bash / fish
+
+自动 hook **仅支持 zsh**。其它 shell 请在配置中手工：
+
+```bash
+# bash: ~/.bash_profile 或 ~/.bashrc
+[ -f "$HOME/.grokswitch/active.env" ] && . "$HOME/.grokswitch/active.env"
+```
+
+```fish
+# fish: ~/.config/fish/conf.d/grokswitch.fish
+if test -f $HOME/.grokswitch/active.env
+  source $HOME/.grokswitch/active.env
+end
+```
+
 ## 使用流程
 
-1. 启动 GrokSwitch（菜单栏出现 `G·…`）
+1. 启动 GrokSwitch（菜单栏出现 Grok 图标）
 2. 首次运行会导入当前 `~/.grok` 登录态为「默认」
 3. **添加账号** → 输入名称 → 自动打开终端 → 运行 `grok login`
 4. 之后在菜单里点选即可切换
-5. **新开终端** 后 `echo $GROK_HOME` 应指向当前 profile
+5. **新开 zsh 终端** 后 `echo $GROK_HOME` 应指向当前 profile
 
 已打开的终端不会自动变账号，请重开或：
 
@@ -83,11 +100,31 @@ fi
 source ~/.grokswitch/active.env
 ```
 
+### 设置入口
+
+菜单栏图标 → **设置…**（本应用为菜单栏 agent，不一定出现在「系统设置」列表中）。
+
+### 终端支持
+
+| 终端 | 启动 grok 命令 |
+|------|----------------|
+| Terminal / iTerm2 | 可靠（AppleScript） |
+| Ghostty / Otty / Alacritty / Kitty / WezTerm | 可靠（直接启动二进制） |
+| Warp / Hyper / Tabby | 尽力而为：仅打开应用；依赖 shell hook 的 `GROK_HOME`，需手动 `grok` |
+
+## 配置损坏恢复
+
+若 `~/.grokswitch/config.json` 损坏，应用**不会**用空配置覆盖它，并会显示错误。
+
+1. 查看 / 备份：`~/.grokswitch/config.json`
+2. 修复 JSON，或删除该文件后重启以重新 seed（账号目录 `profiles/*` 可能仍在，需手动对照恢复列表）
+3. 菜单中点「刷新账号与用量」
+
 ## 注意
 
 - **不要**把 `~/.grok` 做成指向 profile 的软链接：Grok sandbox 会拒绝 symlink 形式的 `$GROK_HOME`。
+- profile 的 `homePath` 必须位于 `~/.grokswitch/profiles/<id>`；手改 config 指向其它路径会被拒绝。
 - 首次用 Terminal / iTerm2 打开 Grok 时，macOS 可能询问「自动化 / 控制该终端」权限，请允许。
-- 默认终端可在 **系统设置 → GrokSwitch**（或菜单栏应用的 Settings）中切换。
 - 本工具读取 `auth.json` 中的 email / 名字用于展示，并用其中的 access token 向 grok.com 查询用量；凭证不会上传到第三方。
 - 团队账号可能无法查询个人用量（接口限制）；登录过期后需在对应 profile 下重新 `grok login`。
 
