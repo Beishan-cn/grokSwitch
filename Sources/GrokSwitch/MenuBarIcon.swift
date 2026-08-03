@@ -4,20 +4,18 @@ import SwiftUI
 /// Menu bar Grok brand mark, drawn to match CodexBar's brand-icon mode
 /// (`ProviderBrandIcon`: 16×16pt template SVG/PNG, no usage ring; percent is text).
 enum MenuBarIcon {
-    /// CodexBar `ProviderBrandIcon` uses 16×16.
+    /// Fixed canvas so loading/non-loading never jumps in the menu bar.
+    private static let canvasPointSize: CGFloat = 16
     private static let brandPointSize: CGFloat = 16
-    /// Slightly larger canvas when we attach a remaining ring so the stroke doesn't clip.
-    private static let ringPointSize: CGFloat = 18
     private static let outputScale: CGFloat = 2
 
     private static let cacheLock = NSLock()
     private static var baseTemplate: NSImage?
     private static var renderedCache: [CacheKey: NSImage] = [:]
 
-    private struct CacheKey: Hashable {
-        /// -3 = brand only (no ring); -2 loading arc; -1 idle; 0…20 remaining 5% buckets
-        var remainingBucket: Int
-        var severity: Int
+    private enum CacheKey: Hashable {
+        case brand
+        case loading
     }
 
     /// SwiftUI image for MenuBarExtra label.
@@ -28,12 +26,7 @@ enum MenuBarIcon {
     static func nsImage(usage: ProfileUsage?) -> NSImage {
         // Match CodexBar brand+percent: clean brand mark; remaining % lives in the title text.
         // Only draw a ring for loading (partial arc) so the slot still feels alive while fetching.
-        let key: CacheKey
-        if usage?.status == .loading {
-            key = CacheKey(remainingBucket: -2, severity: 0)
-        } else {
-            key = CacheKey(remainingBucket: -3, severity: 0)
-        }
+        let key: CacheKey = usage?.status == .loading ? .loading : .brand
 
         cacheLock.lock()
         if let cached = renderedCache[key] {
@@ -45,10 +38,8 @@ enum MenuBarIcon {
         let image: NSImage
         if usage?.status == .loading {
             image = renderBrandWithLoadingArc()
-        } else if let brand = loadBaseTemplate() {
-            image = brand
         } else {
-            image = renderFallbackMonogram()
+            image = renderBrandOnly()
         }
 
         cacheLock.lock()
@@ -98,14 +89,37 @@ enum MenuBarIcon {
         return loaded
     }
 
-    // MARK: - Loading arc (only non-brand decoration)
+    // MARK: - Rendered bitmaps (never return shared baseTemplate)
 
-    /// Brand mark + faint incomplete track while usage is loading (CodexBar animates bars; we keep it minimal).
+    private static func renderBrandOnly() -> NSImage {
+        let size = NSSize(width: canvasPointSize, height: canvasPointSize)
+        return renderIntoBitmap(size: size) { rect in
+            let markSize = brandPointSize * 0.92
+            let markRect = NSRect(
+                x: rect.midX - markSize / 2,
+                y: rect.midY - markSize / 2,
+                width: markSize,
+                height: markSize
+            )
+            if let base = loadBaseTemplate() {
+                base.draw(in: markRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+            } else {
+                drawMonogram(in: markRect)
+            }
+        }
+    }
+
+    /// Brand mark + faint incomplete track while usage is loading (same 16pt canvas).
     private static func renderBrandWithLoadingArc() -> NSImage {
-        let size = NSSize(width: ringPointSize, height: ringPointSize)
-        let pixels = Int(ringPointSize * outputScale)
-        let image = NSImage(size: size)
+        let size = NSSize(width: canvasPointSize, height: canvasPointSize)
+        return renderIntoBitmap(size: size) { rect in
+            drawLoadingComposite(in: rect)
+        }
+    }
 
+    private static func renderIntoBitmap(size: NSSize, draw: (NSRect) -> Void) -> NSImage {
+        let pixels = Int(size.width * outputScale)
+        let image = NSImage(size: size)
         if let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: pixels,
@@ -123,21 +137,20 @@ enum MenuBarIcon {
             NSGraphicsContext.saveGraphicsState()
             if let ctx = NSGraphicsContext(bitmapImageRep: rep) {
                 NSGraphicsContext.current = ctx
-                drawLoadingComposite(in: NSRect(origin: .zero, size: size))
+                draw(NSRect(origin: .zero, size: size))
             }
             NSGraphicsContext.restoreGraphicsState()
         } else {
             image.lockFocus()
-            drawLoadingComposite(in: NSRect(origin: .zero, size: size))
+            draw(NSRect(origin: .zero, size: size))
             image.unlockFocus()
         }
-
         image.isTemplate = true
         return image
     }
 
     private static func drawLoadingComposite(in rect: NSRect) {
-        let markSize = brandPointSize
+        let markSize = brandPointSize * 0.78
         let markRect = NSRect(
             x: rect.midX - markSize / 2,
             y: rect.midY - markSize / 2,
@@ -152,23 +165,13 @@ enum MenuBarIcon {
         }
 
         let center = CGPoint(x: rect.midX, y: rect.midY)
-        let radius = min(rect.width, rect.height) / 2 - 1.25
+        let radius = min(rect.width, rect.height) / 2 - 1.0
         let track = NSBezierPath()
         track.appendArc(withCenter: center, radius: radius, startAngle: 40, endAngle: 300)
-        track.lineWidth = 1.5
+        track.lineWidth = 1.25
         track.lineCapStyle = .round
         NSColor.black.withAlphaComponent(0.35).setStroke()
         track.stroke()
-    }
-
-    private static func renderFallbackMonogram() -> NSImage {
-        let size = NSSize(width: brandPointSize, height: brandPointSize)
-        let image = NSImage(size: size, flipped: false) { rect in
-            drawMonogram(in: rect)
-            return true
-        }
-        image.isTemplate = true
-        return image
     }
 
     private static func drawMonogram(in rect: NSRect) {

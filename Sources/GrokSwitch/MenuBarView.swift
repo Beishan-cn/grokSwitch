@@ -88,9 +88,22 @@ struct MenuBarView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
+            } else if store.config.profiles.count > 8 {
+                // Scroll only when many accounts. A bare ScrollView in MenuBarExtra's VStack
+                // often collapses to 0 height → stacked Dividers look double and rows vanish.
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(store.config.profiles) { profile in
+                            profileRow(profile)
+                        }
+                    }
+                }
+                .frame(maxHeight: 280)
             } else {
-                ForEach(store.config.profiles) { profile in
-                    profileRow(profile)
+                VStack(spacing: 0) {
+                    ForEach(store.config.profiles) { profile in
+                        profileRow(profile)
+                    }
                 }
             }
         }
@@ -135,6 +148,10 @@ struct MenuBarView: View {
                     Text(label)
                         .font(.body.monospacedDigit().weight(.semibold))
                         .foregroundStyle(usageColor(usage?.severity))
+                } else if identity?.hasBrokenAuthFile == true {
+                    Circle()
+                        .fill(Color.red.opacity(0.85))
+                        .frame(width: 7, height: 7)
                 } else if identity?.isLoggedIn == true, identity?.isExpired != true {
                     Circle()
                         .fill(Color.green.opacity(0.85))
@@ -341,7 +358,7 @@ struct MenuBarView: View {
             Button {
                 store.reload()
                 store.refreshUsage(force: true)
-                store.statusMessage = "已刷新账号与用量"
+                store.noteStatus("已刷新账号与用量")
             } label: {
                 labelRow(
                     systemImage: "arrow.clockwise",
@@ -446,11 +463,9 @@ struct MenuBarView: View {
     }
 
     private func confirmAdd() {
-        if let profile = store.addProfile(name: newProfileName) {
+        if let profile = store.addProfile(name: newProfileName, activate: true) {
             isAdding = false
             newProfileName = ""
-            // Switch to the new profile and open terminal for login
-            _ = store.switchTo(profileID: profile.id)
             store.openTerminal(for: profile)
         }
     }
@@ -594,29 +609,20 @@ struct MenuBarView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 6)
-            } else {
-                // Cap height with a scrollable-feel list; MenuBarExtra windows are limited.
-                ForEach(scannedProjects) { project in
-                    let isSelected = pendingProjectPath == project.path
-                    Button {
-                        pendingProjectPath = project.path
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                                .frame(width: 16)
-                            Text(project.name)
-                                .font(.body.weight(isSelected ? .semibold : .regular))
-                                .lineLimit(1)
-                            Spacer(minLength: 8)
+            } else if scannedProjects.count > 10 {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(scannedProjects) { project in
+                            projectPickRow(project)
                         }
-                        .contentShape(Rectangle())
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .buttonStyle(MenuRowButtonStyle())
-                    .padding(.horizontal, 12)
+                }
+                .frame(maxHeight: 240)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(scannedProjects) { project in
+                        projectPickRow(project)
+                    }
                 }
             }
 
@@ -677,6 +683,29 @@ struct MenuBarView: View {
         .padding(.bottom, 4)
     }
 
+    private func projectPickRow(_ project: ProjectFolder) -> some View {
+        let isSelected = pendingProjectPath == project.path
+        return Button {
+            pendingProjectPath = project.path
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .frame(width: 16)
+                Text(project.name)
+                    .font(.body.weight(isSelected ? .semibold : .regular))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(MenuRowButtonStyle())
+        .padding(.horizontal, 12)
+    }
+
     private var projectScanHint: String {
         let root = ProjectScanner.displayRoot(configured: store.config.projectsScanRoot)
         let mode = ProjectScanner.isUsingConfiguredRoot(store.config.projectsScanRoot) ? "" : "（自动）"
@@ -703,7 +732,10 @@ struct MenuBarView: View {
         ) else {
             return
         }
+        // Commit immediately: MenuBarExtra often dismisses when the panel steals focus.
         pendingProjectPath = url.path
+        store.setPreferredProjectPath(url.path)
+        refreshScannedProjects()
     }
 
     private func changeScanRoot() {

@@ -14,7 +14,9 @@ struct GrokSwitchApp: App {
                 MenuBarIcon.image(usage: store.activeUsage)
                     .renderingMode(.template)
                     .frame(width: 16, height: 16)
-                Text(store.menuBarTitle)
+                if !store.menuBarTitle.isEmpty {
+                    Text(store.menuBarTitle)
+                }
             }
         }
         .menuBarExtraStyle(.window)
@@ -90,7 +92,7 @@ struct SettingsView: View {
                         store.setShowEmailInMenuBar(newValue)
                     }
                 ))
-                Text("菜单栏默认只显示 Grok 图标与剩余百分比，账号名在下拉列表中查看。用量按每个账号的 auth.json 独立查询。")
+                Text("菜单栏默认只显示 Grok 图标与剩余百分比；开启上方开关后，在无用量数据时显示账号短名。账号名始终可在下拉列表中查看。用量按每个账号的 auth.json 独立查询。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -183,7 +185,7 @@ struct SettingsView: View {
                 }
             }
             Section("说明") {
-                Text("切换账号后，新开的终端会通过 ~/.zshrc 加载 GROK_HOME。已打开的终端需要重开或手动 source ~/.grokswitch/active.env。")
+                Text("切换账号后，新开的 zsh 终端会通过 ~/.zshrc 加载 GROK_HOME。bash/fish 请手动 source ~/.grokswitch/active.env。已打开的终端需要重开。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -276,15 +278,11 @@ struct SettingsView: View {
 
     private func syncRenameDrafts(with profiles: [Profile]? = nil) {
         let list = profiles ?? store.config.profiles
-        var drafts = renameDrafts
-        let ids = Set(list.map(\.id))
-        for key in drafts.keys where !ids.contains(key) {
-            drafts.removeValue(forKey: key)
-        }
+        var drafts: [String: String] = [:]
+        // Re-seed from store so menu renames cannot be undone by stale Settings drafts.
+        // In-progress edits are lost when the profile list changes; acceptable for this UI.
         for profile in list {
-            if drafts[profile.id] == nil {
-                drafts[profile.id] = profile.name
-            }
+            drafts[profile.id] = profile.name
         }
         renameDrafts = drafts
     }
