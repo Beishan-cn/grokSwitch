@@ -52,29 +52,42 @@ struct MenuBarView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline) {
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text("GrokSwitch")
                     .font(.headline)
-                Spacer(minLength: 8)
+                if let active = store.activeProfile {
+                    let identity = store.identities[active.id]
+                    // Usage / GROK_HOME path live elsewhere (profile rows, Settings) so the
+                    // header stays a compact identity summary.
+                    Text(identity?.detailLabel ?? active.name)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else {
+                    Text("尚未配置账号")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 8)
+            Button {
+                store.reload()
+                store.refreshUsage(force: true)
+                store.noteStatus("已刷新账号与用量")
+            } label: {
                 if store.isRefreshingUsage {
                     ProgressView()
                         .controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
                 }
             }
-            if let active = store.activeProfile {
-                let identity = store.identities[active.id]
-                // Usage / GROK_HOME path live elsewhere (profile rows, Settings) so the
-                // header stays a compact identity summary.
-                Text(identity?.detailLabel ?? active.name)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            } else {
-                Text("尚未配置账号")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            .buttonStyle(.plain)
+            .disabled(store.isRefreshingUsage)
+            .help("刷新账号与用量")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
@@ -354,20 +367,6 @@ struct MenuBarView: View {
             if isManaging {
                 manageAccountsInline
             }
-
-            Button {
-                store.reload()
-                store.refreshUsage(force: true)
-                store.noteStatus("已刷新账号与用量")
-            } label: {
-                labelRow(
-                    systemImage: "arrow.clockwise",
-                    title: store.isRefreshingUsage ? "刷新中…" : "刷新账号与用量"
-                )
-            }
-            .buttonStyle(MenuRowButtonStyle())
-            .padding(.horizontal, 4)
-            .disabled(store.isRefreshingUsage)
         }
     }
 
