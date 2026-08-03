@@ -231,19 +231,6 @@ final class ProfileStore: ObservableObject {
         }
     }
 
-    func copyLaunchCommand(for profile: Profile? = nil) {
-        let target = profile ?? activeProfile
-        guard let target else { return }
-        let cmd = TerminalLauncher.launchCommand(
-            profile: target,
-            projectPath: config.preferredProjectPath
-        )
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(cmd, forType: .string)
-        statusMessage = "已复制启动命令"
-    }
-
     func setShowEmailInMenuBar(_ value: Bool) {
         config.showEmailInMenuBar = value
         do {

@@ -207,14 +207,6 @@ struct MenuBarView: View {
             }
 
             Button {
-                store.copyLaunchCommand()
-            } label: {
-                labelRow(systemImage: "doc.on.clipboard", title: "复制启动命令")
-            }
-            .buttonStyle(MenuRowButtonStyle())
-            .padding(.horizontal, 4)
-
-            Button {
                 newProfileName = ""
                 isAdding = true
             } label: {
