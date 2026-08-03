@@ -27,6 +27,9 @@ struct AppConfig: Codable, Equatable {
     /// Absolute path of the preferred project directory to open Grok in (`--cwd`).
     /// Empty / nil means no project (open without a repo).
     var preferredProjectPath: String?
+    /// Absolute path of the directory whose immediate subfolders are listed as project candidates.
+    /// Empty / nil means auto-detect a common folder under `~` (Projects, Developer, Code, …).
+    var projectsScanRoot: String?
 
     static let currentVersion = 1
 
@@ -38,7 +41,8 @@ struct AppConfig: Codable, Equatable {
             showEmailInMenuBar: false,
             showUsageInMenuBar: true,
             preferredTerminal: TerminalApp.terminal.rawValue,
-            preferredProjectPath: nil
+            preferredProjectPath: nil,
+            projectsScanRoot: nil
         )
     }
 
@@ -56,7 +60,7 @@ struct AppConfig: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case version, activeProfileID, profiles, showEmailInMenuBar, showUsageInMenuBar
-        case preferredTerminal, preferredProjectPath
+        case preferredTerminal, preferredProjectPath, projectsScanRoot
     }
 
     init(
@@ -66,7 +70,8 @@ struct AppConfig: Codable, Equatable {
         showEmailInMenuBar: Bool,
         showUsageInMenuBar: Bool = true,
         preferredTerminal: String = TerminalApp.terminal.rawValue,
-        preferredProjectPath: String? = nil
+        preferredProjectPath: String? = nil,
+        projectsScanRoot: String? = nil
     ) {
         self.version = version
         self.activeProfileID = activeProfileID
@@ -75,6 +80,7 @@ struct AppConfig: Codable, Equatable {
         self.showUsageInMenuBar = showUsageInMenuBar
         self.preferredTerminal = preferredTerminal
         self.preferredProjectPath = preferredProjectPath
+        self.projectsScanRoot = projectsScanRoot
     }
 
     init(from decoder: Decoder) throws {
@@ -87,10 +93,11 @@ struct AppConfig: Codable, Equatable {
         preferredTerminal = try c.decodeIfPresent(String.self, forKey: .preferredTerminal)
             ?? TerminalApp.terminal.rawValue
         preferredProjectPath = try c.decodeIfPresent(String.self, forKey: .preferredProjectPath)
+        projectsScanRoot = try c.decodeIfPresent(String.self, forKey: .projectsScanRoot)
     }
 }
 
-/// A project folder under ~/Projects (or the configured scan root).
+/// A project folder under the configured (or auto-detected) scan root.
 struct ProjectFolder: Identifiable, Equatable, Hashable {
     var id: String { path }
     var name: String
@@ -98,15 +105,72 @@ struct ProjectFolder: Identifiable, Equatable, Hashable {
 }
 
 enum ProjectScanner {
-    /// Root directory to scan for project folders.
-    static var projectsRoot: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Projects")
+    /// Common parent-folder names under `~` (first existing wins when auto-detecting).
+    /// Covers typical layouts across languages/locales without hardcoding one user's path.
+    static let commonRootNames: [String] = [
+        "Projects",
+        "Developer",
+        "Development",
+        "Code",
+        "Repos",
+        "repos",
+        "workspace",
+        "Workspace",
+        "src",
+        "dev",
+        "Sites",
+        "项目",
+        "代码",
+    ]
+
+    /// Resolve the directory to scan: configured path if valid, else auto-detect.
+    static func resolveRoot(configured: String?) -> URL? {
+        if let configured,
+           let url = existingDirectory(expanding: configured)
+        {
+            return url
+        }
+        return autoDetectedRoot()
     }
 
-    /// List immediate subdirectories under the projects root (non-hidden, folders only).
-    static func scan() -> [ProjectFolder] {
-        let root = projectsRoot
+    /// First existing common project parent under the home directory.
+    static func autoDetectedRoot() -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        for name in commonRootNames {
+            let url = home.appendingPathComponent(name)
+            if isDirectory(url) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    /// Short display path (`~/Projects`, full path if outside home).
+    static func displayPath(for url: URL?) -> String {
+        guard let url else { return "未找到" }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let path = url.path
+        if path.hasPrefix(home) {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
+    }
+
+    static func displayRoot(configured: String?) -> String {
+        displayPath(for: resolveRoot(configured: configured))
+    }
+
+    /// Whether the scan root comes from user config (vs auto-detect).
+    static func isUsingConfiguredRoot(_ configured: String?) -> Bool {
+        guard let configured else { return false }
+        return existingDirectory(expanding: configured) != nil
+    }
+
+    /// List immediate subdirectories under the resolved scan root (non-hidden, folders only).
+    static func scan(configuredRoot: String? = nil) -> [ProjectFolder] {
+        guard let root = resolveRoot(configured: configuredRoot) else {
+            return []
+        }
         let fm = FileManager.default
         guard let contents = try? fm.contentsOfDirectory(
             at: root,
@@ -118,11 +182,7 @@ enum ProjectScanner {
 
         var folders: [ProjectFolder] = []
         for url in contents {
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
-                continue
-            }
-            // Skip common non-project junk if any
+            guard isDirectory(url) else { continue }
             let name = url.lastPathComponent
             if name.hasPrefix(".") { continue }
             folders.append(ProjectFolder(name: name, path: url.path))
@@ -130,5 +190,23 @@ enum ProjectScanner {
         return folders.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
+    }
+
+    // MARK: - Helpers
+
+    private static func existingDirectory(expanding raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let path = (trimmed as NSString).expandingTildeInPath
+        let url = URL(fileURLWithPath: path)
+        return isDirectory(url) ? url : nil
+    }
+
+    private static func isDirectory(_ url: URL) -> Bool {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+            return false
+        }
+        return isDir.boolValue
     }
 }

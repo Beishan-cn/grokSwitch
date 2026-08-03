@@ -77,6 +77,28 @@ struct SettingsView: View {
                     .font(.caption)
             }
             Section {
+                LabeledContent("扫描目录") {
+                    Text(scanRootLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                }
+                HStack {
+                    Button("选择扫描目录…") {
+                        chooseScanRoot()
+                    }
+                    if ProjectScanner.isUsingConfiguredRoot(store.config.projectsScanRoot) {
+                        Button("恢复自动检测") {
+                            store.setProjectsScanRoot(nil)
+                            refreshScannedProjects()
+                        }
+                    }
+                    Spacer()
+                    Button("浏览项目…") {
+                        chooseAnyProject()
+                    }
+                }
                 Picker("默认项目", selection: Binding(
                     get: { store.config.preferredProjectPath ?? "" },
                     set: { newValue in
@@ -103,11 +125,11 @@ struct SettingsView: View {
             } header: {
                 Text("项目")
             } footer: {
-                Text("自动扫描 ~/Projects 下的文件夹。「用当前账号打开 Grok」会以 grok --cwd 进入所选项目。")
+                Text(projectSectionFooter)
                     .font(.caption)
             }
             .onAppear {
-                scannedProjects = ProjectScanner.scan()
+                refreshScannedProjects()
             }
             Section("路径") {
                 LabeledContent("配置目录") {
@@ -128,7 +150,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440, height: 480)
+        .frame(width: 440, height: 560)
         .padding()
     }
 
@@ -151,6 +173,52 @@ struct SettingsView: View {
             return app.displayName
         }
         return "\(app.displayName)（未安装）"
+    }
+
+    private var scanRootLabel: String {
+        let path = ProjectScanner.displayRoot(configured: store.config.projectsScanRoot)
+        if ProjectScanner.isUsingConfiguredRoot(store.config.projectsScanRoot) {
+            return path
+        }
+        if ProjectScanner.resolveRoot(configured: nil) == nil {
+            return "未找到（请手动选择）"
+        }
+        return "\(path)（自动）"
+    }
+
+    private var projectSectionFooter: String {
+        let root = ProjectScanner.displayRoot(configured: store.config.projectsScanRoot)
+        return "扫描 \(root) 下的子文件夹作为候选；也可「浏览项目」任选路径。「用当前账号打开 Grok」会以 grok --cwd 进入所选项目。未配置时自动识别 ~/Projects、~/Developer、~/Code 等常见目录。"
+    }
+
+    private func refreshScannedProjects() {
+        scannedProjects = ProjectScanner.scan(configuredRoot: store.config.projectsScanRoot)
+    }
+
+    private func chooseScanRoot() {
+        let start = ProjectScanner.resolveRoot(configured: store.config.projectsScanRoot)
+        guard let url = FolderPicker.pickDirectory(
+            message: "选择要扫描的项目父目录（其下的一级子文件夹会出现在列表中）",
+            prompt: "用作扫描目录",
+            startingAt: start
+        ) else {
+            return
+        }
+        store.setProjectsScanRoot(url.path)
+        refreshScannedProjects()
+    }
+
+    private func chooseAnyProject() {
+        let start = ProjectScanner.resolveRoot(configured: store.config.projectsScanRoot)
+        guard let url = FolderPicker.pickDirectory(
+            message: "选择用作默认项目的文件夹（将作为 grok --cwd）",
+            prompt: "设为默认项目",
+            startingAt: start
+        ) else {
+            return
+        }
+        store.setPreferredProjectPath(url.path)
+        refreshScannedProjects()
     }
 }
 

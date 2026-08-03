@@ -231,6 +231,31 @@ final class ProfileStore: ObservableObject {
         }
     }
 
+    /// Set the parent directory whose subfolders are listed as project candidates.
+    /// Pass `nil` to fall back to auto-detecting common names under `~`.
+    func setProjectsScanRoot(_ path: String?) {
+        let normalized: String?
+        if let path, !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            normalized = (path as NSString).expandingTildeInPath
+        } else {
+            normalized = nil
+        }
+        config.projectsScanRoot = normalized
+        do {
+            try saveConfig()
+            objectWillChange.send()
+            if let path = normalized {
+                statusMessage = "项目扫描目录已设为 \(ProjectScanner.displayPath(for: URL(fileURLWithPath: path)))"
+            } else {
+                let auto = ProjectScanner.displayRoot(configured: nil)
+                statusMessage = "已恢复自动检测扫描目录（当前：\(auto)）"
+            }
+            lastError = nil
+        } catch {
+            lastError = "保存设置失败：\(error.localizedDescription)"
+        }
+    }
+
     func setShowEmailInMenuBar(_ value: Bool) {
         config.showEmailInMenuBar = value
         do {

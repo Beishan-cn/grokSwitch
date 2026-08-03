@@ -3,13 +3,14 @@ import SwiftUI
 struct MenuBarView: View {
     @EnvironmentObject private var store: ProfileStore
     @Environment(\.openSettings) private var openSettings
+    /// Inline expander for add-account form (sheet on MenuBarExtra breaks after focus loss).
     @State private var isAdding = false
     @State private var newProfileName = ""
     /// Inline expander for terminal list (sheet on MenuBarExtra is flaky and auto-closes).
     @State private var isChoosingTerminal = false
     /// Pending pick while the expander is open; committed only on 完成.
     @State private var pendingTerminal: TerminalApp = .terminal
-    /// Inline expander for project list under ~/Projects.
+    /// Inline expander for project list under the scan root.
     @State private var isChoosingProject = false
     /// Pending project path (`nil` = no project). Committed only on 完成.
     @State private var pendingProjectPath: String? = nil
@@ -43,9 +44,6 @@ struct MenuBarView: View {
         }
         .padding(.vertical, 4)
         .frame(minWidth: 280)
-        .sheet(isPresented: $isAdding) {
-            addProfileSheet
-        }
     }
 
     private var header: some View {
@@ -162,6 +160,8 @@ struct MenuBarView: View {
                     isChoosingTerminal = false
                 } else {
                     isChoosingProject = false
+                    isAdding = false
+                    newProfileName = ""
                     pendingTerminal = store.config.preferredTerminalApp
                     isChoosingTerminal = true
                 }
@@ -186,8 +186,10 @@ struct MenuBarView: View {
                     isChoosingProject = false
                 } else {
                     isChoosingTerminal = false
+                    isAdding = false
+                    newProfileName = ""
                     pendingProjectPath = store.config.preferredProjectPath
-                    scannedProjects = ProjectScanner.scan()
+                    refreshScannedProjects()
                     isChoosingProject = true
                 }
             } label: {
@@ -207,13 +209,28 @@ struct MenuBarView: View {
             }
 
             Button {
-                newProfileName = ""
-                isAdding = true
+                if isAdding {
+                    // Collapse without saving
+                    isAdding = false
+                    newProfileName = ""
+                } else {
+                    isChoosingTerminal = false
+                    isChoosingProject = false
+                    newProfileName = ""
+                    isAdding = true
+                }
             } label: {
-                labelRow(systemImage: "plus.circle", title: "添加账号…")
+                labelRow(
+                    systemImage: "plus.circle",
+                    title: isAdding ? "添加账号" : "添加账号…"
+                )
             }
             .buttonStyle(MenuRowButtonStyle())
             .padding(.horizontal, 4)
+
+            if isAdding {
+                addProfileInline
+            }
 
             Button {
                 store.reload()
@@ -262,35 +279,41 @@ struct MenuBarView: View {
         }
     }
 
-    private var addProfileSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("添加 Grok 账号")
-                .font(.title3.weight(.semibold))
-            Text("会创建一个独立的 GROK_HOME 目录。创建后用该账号打开终端，运行 grok login 完成登录。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+    /// Inline form under the menu (no sheet — MenuBarExtra sheets break after focus loss).
+    private var addProfileInline: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("独立 GROK_HOME · 创建后打开终端运行 grok login")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
             TextField("显示名称（如 工作 / 个人）", text: $newProfileName)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit { confirmAdd() }
 
-            HStack {
-                Spacer()
-                Button("取消") { isAdding = false }
-                    .keyboardShortcut(.cancelAction)
+            HStack(spacing: 8) {
+                Button("取消") {
+                    isAdding = false
+                    newProfileName = ""
+                }
+                .buttonStyle(.bordered)
+
                 Button("创建") { confirmAdd() }
+                    .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(newProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .padding(20)
-        .frame(width: 360)
+        .padding(.horizontal, 16)
+        .padding(.top, 2)
+        .padding(.bottom, 8)
     }
 
     private func confirmAdd() {
         if let profile = store.addProfile(name: newProfileName) {
             isAdding = false
+            newProfileName = ""
             // Switch to the new profile and open terminal for login
             _ = store.switchTo(profileID: profile.id)
             store.openTerminal(for: profile)
@@ -373,7 +396,7 @@ struct MenuBarView: View {
     /// Inline project list under the menu (same pattern as terminal picker).
     private var projectPickerInline: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("扫描 \(shortProjectsRoot) · 点选后按「完成」保存")
+            Text(projectScanHint)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .padding(.horizontal, 16)
@@ -401,7 +424,7 @@ struct MenuBarView: View {
             .padding(.horizontal, 12)
 
             if scannedProjects.isEmpty {
-                Text("未找到项目文件夹")
+                Text(emptyProjectsMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 20)
@@ -432,7 +455,7 @@ struct MenuBarView: View {
                 }
             }
 
-            // Keep a saved path visible if it is outside ~/Projects or was renamed.
+            // Keep a saved path visible if it is outside the scan root or was renamed.
             if let pending = pendingProjectPath,
                !scannedProjects.contains(where: { $0.path == pending }) {
                 let name = (pending as NSString).lastPathComponent
@@ -450,6 +473,23 @@ struct MenuBarView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 6)
             }
+
+            // Free-form pick + scan-root change (not everyone uses ~/Projects).
+            HStack(spacing: 8) {
+                Button("浏览…") {
+                    browseAnyProject()
+                }
+                .buttonStyle(.bordered)
+
+                Button("扫描目录…") {
+                    changeScanRoot()
+                }
+                .buttonStyle(.bordered)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
 
             HStack(spacing: 8) {
                 Button("取消") {
@@ -472,13 +512,46 @@ struct MenuBarView: View {
         .padding(.bottom, 4)
     }
 
-    private var shortProjectsRoot: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let path = ProjectScanner.projectsRoot.path
-        if path.hasPrefix(home) {
-            return "~" + path.dropFirst(home.count)
+    private var projectScanHint: String {
+        let root = ProjectScanner.displayRoot(configured: store.config.projectsScanRoot)
+        let mode = ProjectScanner.isUsingConfiguredRoot(store.config.projectsScanRoot) ? "" : "（自动）"
+        return "扫描 \(root)\(mode) · 点选后按「完成」保存"
+    }
+
+    private var emptyProjectsMessage: String {
+        if ProjectScanner.resolveRoot(configured: store.config.projectsScanRoot) == nil {
+            return "未找到常见项目目录，请点「扫描目录…」或「浏览…」"
         }
-        return path
+        return "该目录下没有子文件夹，可「浏览…」任选路径"
+    }
+
+    private func refreshScannedProjects() {
+        scannedProjects = ProjectScanner.scan(configuredRoot: store.config.projectsScanRoot)
+    }
+
+    private func browseAnyProject() {
+        let start = ProjectScanner.resolveRoot(configured: store.config.projectsScanRoot)
+        guard let url = FolderPicker.pickDirectory(
+            message: "选择用作默认项目的文件夹",
+            prompt: "设为默认项目",
+            startingAt: start
+        ) else {
+            return
+        }
+        pendingProjectPath = url.path
+    }
+
+    private func changeScanRoot() {
+        let start = ProjectScanner.resolveRoot(configured: store.config.projectsScanRoot)
+        guard let url = FolderPicker.pickDirectory(
+            message: "选择要扫描的项目父目录",
+            prompt: "用作扫描目录",
+            startingAt: start
+        ) else {
+            return
+        }
+        store.setProjectsScanRoot(url.path)
+        refreshScannedProjects()
     }
 
     private func projectDisplayName(_ path: String?) -> String {

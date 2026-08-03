@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 enum Paths {
@@ -49,5 +50,35 @@ enum Paths {
         }
         // Fall back to PATH lookup via /usr/bin/env
         return URL(fileURLWithPath: "/usr/bin/env")
+    }
+}
+
+/// Native folder picker for menu-bar / settings flows.
+enum FolderPicker {
+    /// Present an `NSOpenPanel` for a single directory. Returns `nil` if cancelled.
+    @MainActor
+    static func pickDirectory(
+        message: String,
+        prompt: String = "选择",
+        startingAt: URL? = nil
+    ) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = prompt
+        panel.message = message
+        if let startingAt {
+            panel.directoryURL = startingAt
+        } else if let auto = ProjectScanner.autoDetectedRoot() {
+            panel.directoryURL = auto
+        } else {
+            panel.directoryURL = Paths.home
+        }
+        // Menu bar apps are often inactive; bring forward so the panel is usable.
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
 }
