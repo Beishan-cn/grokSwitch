@@ -135,12 +135,25 @@ final class ProfileStore: ObservableObject {
             lastError = "没有可用账号"
             return
         }
+        let terminal = config.preferredTerminalApp
         do {
-            try TerminalLauncher.open(profile: target)
-            statusMessage = "已打开终端：\(target.name)"
+            try TerminalLauncher.open(profile: target, terminal: terminal)
+            statusMessage = "已用 \(terminal.displayName) 打开：\(target.name)"
             lastError = nil
         } catch {
             lastError = "打开终端失败：\(error.localizedDescription)"
+        }
+    }
+
+    func setPreferredTerminal(_ terminal: TerminalApp) {
+        config.preferredTerminal = terminal.rawValue
+        do {
+            try saveConfig()
+            objectWillChange.send()
+            statusMessage = "默认终端已设为 \(terminal.displayName)"
+            lastError = nil
+        } catch {
+            lastError = "保存设置失败：\(error.localizedDescription)"
         }
     }
 
@@ -229,7 +242,8 @@ final class ProfileStore: ObservableObject {
                 version: AppConfig.currentVersion,
                 activeProfileID: profile.id,
                 profiles: [profile],
-                showEmailInMenuBar: true
+                showEmailInMenuBar: true,
+                preferredTerminal: TerminalApp.terminal.rawValue
             )
             try? saveConfig()
             try? writeActiveEnv(for: profile)
@@ -273,7 +287,8 @@ final class ProfileStore: ObservableObject {
                 version: AppConfig.currentVersion,
                 activeProfileID: profile.id,
                 profiles: [profile],
-                showEmailInMenuBar: true
+                showEmailInMenuBar: true,
+                preferredTerminal: TerminalApp.terminal.rawValue
             )
             try saveConfig()
             try writeActiveEnv(for: profile)

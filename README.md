@@ -7,7 +7,7 @@ macOS 菜单栏工具：用官方 `GROK_HOME` 隔离多 Grok 账号，一键切�
 - 菜单栏显示当前账号短名（如 `G·antony.beishan`）
 - 点击切换账号（更新 active `GROK_HOME`）
 - 新开终端自动生效（写入 `~/.zshrc` hook + `~/.grokswitch/active.env`）
-- 用当前账号打开 Terminal 并启动 `grok`
+- 用当前账号打开终端并启动 `grok`（可在设置中选择默认终端：Terminal / iTerm2 / Ghostty / Otty / Warp 等）
 - 添加新账号 profile（打开终端后 `grok login`）
 - 首次启动从现有 `~/.grok` 导入默认账号
 
@@ -84,7 +84,8 @@ source ~/.grokswitch/active.env
 ## 注意
 
 - **不要**把 `~/.grok` 做成指向 profile 的软链接：Grok sandbox 会拒绝 symlink 形式的 `$GROK_HOME`。
-- 首次用 Terminal 打开 Grok 时，macOS 可能询问「自动化 / 控制 Terminal」权限，请允许。
+- 首次用 Terminal / iTerm2 打开 Grok 时，macOS 可能询问「自动化 / 控制该终端」权限，请允许。
+- 默认终端可在 **系统设置 → GrokSwitch**（或菜单栏应用的 Settings）中切换。
 - 本工具只读 `auth.json` 中的 email / 名字等展示字段，不会上传任何凭证。
 
 ## 许可

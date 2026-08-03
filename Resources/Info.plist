@@ -27,6 +27,6 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>GrokSwitch 需要控制 Terminal 以使用当前账号打开 Grok。</string>
+	<string>GrokSwitch 需要控制终端应用（Terminal / iTerm2 等）以使用当前账号打开 Grok。</string>
 </dict>
 </plist>

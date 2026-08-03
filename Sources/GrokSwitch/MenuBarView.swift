@@ -2,8 +2,13 @@ import SwiftUI
 
 struct MenuBarView: View {
     @EnvironmentObject private var store: ProfileStore
+    @Environment(\.openSettings) private var openSettings
     @State private var isAdding = false
     @State private var newProfileName = ""
+    /// Inline expander for terminal list (sheet on MenuBarExtra is flaky and auto-closes).
+    @State private var isChoosingTerminal = false
+    /// Pending pick while the expander is open; committed only on 完成.
+    @State private var pendingTerminal: TerminalApp = .terminal
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -122,10 +127,38 @@ struct MenuBarView: View {
             Button {
                 store.openTerminal()
             } label: {
-                labelRow(systemImage: "terminal", title: "用当前账号打开 Grok")
+                labelRow(
+                    systemImage: "terminal",
+                    title: "用当前账号打开 Grok",
+                    subtitle: store.config.preferredTerminalApp.displayName
+                )
             }
             .buttonStyle(MenuRowButtonStyle())
             .padding(.horizontal, 4)
+
+            Button {
+                if isChoosingTerminal {
+                    // Collapse without saving
+                    isChoosingTerminal = false
+                } else {
+                    pendingTerminal = store.config.preferredTerminalApp
+                    isChoosingTerminal = true
+                }
+            } label: {
+                labelRow(
+                    systemImage: "macwindow.on.rectangle",
+                    title: isChoosingTerminal ? "默认终端" : "默认终端…",
+                    subtitle: isChoosingTerminal
+                        ? pendingTerminal.displayName
+                        : store.config.preferredTerminalApp.displayName
+                )
+            }
+            .buttonStyle(MenuRowButtonStyle())
+            .padding(.horizontal, 4)
+
+            if isChoosingTerminal {
+                terminalPickerInline
+            }
 
             Button {
                 store.copyLaunchCommand()
@@ -157,6 +190,15 @@ struct MenuBarView: View {
 
     private var footer: some View {
         VStack(spacing: 0) {
+            Button {
+                NSApp.activate(ignoringOtherApps: true)
+                openSettings()
+            } label: {
+                labelRow(systemImage: "gearshape", title: "设置…")
+            }
+            .buttonStyle(MenuRowButtonStyle())
+            .padding(.horizontal, 4)
+
             Button {
                 NSApp.activate(ignoringOtherApps: true)
                 // Reveal config folder
@@ -212,12 +254,91 @@ struct MenuBarView: View {
         }
     }
 
-    private func labelRow(systemImage: String, title: String) -> some View {
+    /// Inline list under the menu (no sheet — avoids MenuBarExtra auto-dismiss).
+    private var terminalPickerInline: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("点选后按「完成」保存")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 16)
+                .padding(.top, 2)
+                .padding(.bottom, 4)
+
+            ForEach(pickerTerminals) { app in
+                let isSelected = pendingTerminal == app
+                Button {
+                    // Only update local pending state — do not dismiss / save yet.
+                    pendingTerminal = app
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                            .frame(width: 16)
+                        Text(app.displayName)
+                            .font(.body.weight(isSelected ? .semibold : .regular))
+                        Spacer(minLength: 8)
+                        if !app.isInstalled && app != .terminal {
+                            Text("未安装")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(MenuRowButtonStyle())
+                .padding(.horizontal, 12)
+            }
+
+            HStack(spacing: 8) {
+                Button("取消") {
+                    isChoosingTerminal = false
+                }
+                .buttonStyle(.bordered)
+
+                Button("完成") {
+                    store.setPreferredTerminal(pendingTerminal)
+                    isChoosingTerminal = false
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+            .padding(.bottom, 4)
+        }
+        .padding(.bottom, 4)
+    }
+
+    private var pickerTerminals: [TerminalApp] {
+        var list = TerminalApp.installed
+        // Keep both the saved preference and the in-progress pick visible.
+        for extra in [store.config.preferredTerminalApp, pendingTerminal] {
+            if !list.contains(extra) {
+                list.append(extra)
+            }
+        }
+        let order = TerminalApp.allCases
+        return list.sorted {
+            (order.firstIndex(of: $0) ?? 0) < (order.firstIndex(of: $1) ?? 0)
+        }
+    }
+
+    private func labelRow(systemImage: String, title: String, subtitle: String? = nil) -> some View {
         HStack(spacing: 8) {
             Image(systemName: systemImage)
                 .frame(width: 16)
             Text(title)
-            Spacer()
+            Spacer(minLength: 8)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
         .contentShape(Rectangle())
         .padding(.horizontal, 8)
