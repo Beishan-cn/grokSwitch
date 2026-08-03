@@ -5,9 +5,12 @@ struct SettingsView: View {
 
     @State private var scannedProjects: [ProjectFolder] = []
     @State private var profilePendingDelete: Profile?
-    @State private var renameDrafts: [String: String] = [:]
+    /// Inline rename: only one account at a time (display by default, edit on demand).
+    @State private var renamingProfileID: String?
+    @State private var renameDraft = ""
     @State private var isAddingAccount = false
     @State private var newProfileName = ""
+    @FocusState private var renameFieldFocused: Bool
 
     private var installedTerminals: [TerminalApp] {
         TerminalApp.installed
@@ -47,8 +50,10 @@ struct SettingsView: View {
         ) {
             Button("删除账号", role: .destructive) {
                 if let profile = profilePendingDelete {
+                    if renamingProfileID == profile.id {
+                        cancelRename()
+                    }
                     _ = store.deleteProfile(id: profile.id)
-                    renameDrafts.removeValue(forKey: profile.id)
                 }
                 profilePendingDelete = nil
             }
@@ -59,11 +64,13 @@ struct SettingsView: View {
             Text("将永久删除该账号的本地登录数据。")
         }
         .onAppear {
-            syncRenameDrafts()
             refreshScannedProjects()
         }
         .onChange(of: store.config.profiles) { _, profiles in
-            syncRenameDrafts(with: profiles)
+            // Drop rename draft if the profile was removed elsewhere (e.g. menu bar).
+            if let id = renamingProfileID, !profiles.contains(where: { $0.id == id }) {
+                cancelRename()
+            }
         }
     }
 
@@ -101,29 +108,35 @@ struct SettingsView: View {
         SettingsSectionCard(
             title: "账号",
             systemImage: "person.2",
-            footer: "删除会移除该账号的 GROK_HOME 目录（含登录凭证），不可恢复。至少保留一个账号。也可在菜单栏点「管理账号…」。"
+            footer: "删除会移除该账号的 GROK_HOME（含登录凭证），不可恢复。至少保留一个账号。"
         ) {
-            VStack(alignment: .leading, spacing: 12) {
-                if store.config.profiles.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                if store.config.profiles.isEmpty, !isAddingAccount {
                     emptyAccountsView
-                } else {
-                    VStack(spacing: 10) {
-                        ForEach(store.config.profiles) { profile in
-                            accountManageCard(profile)
+                    Divider()
+                } else if !store.config.profiles.isEmpty {
+                    ForEach(Array(store.config.profiles.enumerated()), id: \.element.id) { index, profile in
+                        if index > 0 {
+                            Divider()
                         }
+                        accountRow(profile)
                     }
+                    Divider()
                 }
 
                 if isAddingAccount {
                     addAccountForm
                 } else {
                     Button {
-                        isAddingAccount = true
-                        newProfileName = ""
+                        beginAddAccount()
                     } label: {
                         Label("添加账号…", systemImage: "plus.circle")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                     }
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.tint)
+                    .padding(.vertical, 11)
                 }
             }
         }
@@ -134,15 +147,15 @@ struct SettingsView: View {
             Image(systemName: "person.crop.circle.badge.questionmark")
                 .font(.system(size: 28, weight: .light))
                 .foregroundStyle(.tertiary)
-            Text("没有账号配置")
+            Text("没有账号")
                 .font(.callout.weight(.medium))
-            Text("在此添加账号，或从菜单栏进入账号管理。")
+            Text("添加一个账号后即可切换 GROK_HOME 并登录。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 18)
+        .padding(.vertical, 20)
     }
 
     private var addAccountForm: some View {
@@ -169,16 +182,14 @@ struct SettingsView: View {
             }
             .controlSize(.small)
         }
-        .padding(12)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            Color(nsColor: .textBackgroundColor).opacity(0.45),
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 1)
-        }
+    }
+
+    private func beginAddAccount() {
+        cancelRename()
+        isAddingAccount = true
+        newProfileName = ""
     }
 
     private func confirmAddAccount() {
@@ -364,7 +375,7 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Account card
+    // MARK: - Account row
 
     private var deleteConfirmationTitle: String {
         if let name = profilePendingDelete?.name {
@@ -374,33 +385,50 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private func accountManageCard(_ profile: Profile) -> some View {
+    private func accountRow(_ profile: Profile) -> some View {
         let identity = store.identities[profile.id]
+        let usage = store.usages[profile.id]
         let isActive = store.activeProfile?.id == profile.id
+        let isRenaming = renamingProfileID == profile.id
         let canDelete = store.config.profiles.count > 1
 
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 10) {
-                ZStack {
-                    Circle()
-                        .fill(isActive ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.10))
-                    Image(systemName: identity == nil ? "person.crop.circle.badge.xmark" : "person.crop.circle")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
-                }
-                .frame(width: 34, height: 34)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 12) {
+                // Login status + person glyph (aligned with menu bar semantics).
+                ZStack(alignment: .bottomTrailing) {
+                    ZStack {
+                        Circle()
+                            .fill(isActive ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.10))
+                        Image(systemName: isActive ? "checkmark.circle.fill" : "person.crop.circle")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+                    }
+                    .frame(width: 32, height: 32)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    TextField(
-                        "显示名称",
-                        text: Binding(
-                            get: { renameDrafts[profile.id] ?? profile.name },
-                            set: { renameDrafts[profile.id] = $0 }
-                        )
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit {
-                        commitRename(profileID: profile.id)
+                    Circle()
+                        .fill(loginStatusColor(identity))
+                        .frame(width: 8, height: 8)
+                        .overlay {
+                            Circle()
+                                .stroke(Color(nsColor: .controlBackgroundColor), lineWidth: 1.5)
+                        }
+                        .offset(x: 1, y: 1)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(profile.name)
+                            .font(.body.weight(isActive ? .semibold : .regular))
+                            .lineLimit(1)
+
+                        if isActive {
+                            Text("当前")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.tint)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.accentColor.opacity(0.10), in: Capsule())
+                        }
                     }
 
                     Text(identity?.detailLabel ?? "未登录")
@@ -410,50 +438,62 @@ struct SettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if isActive {
-                    Text("当前")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.tint)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.accentColor.opacity(0.10), in: Capsule())
-                        .overlay {
-                            Capsule()
-                                .stroke(Color.accentColor.opacity(0.22), lineWidth: 1)
-                        }
-                }
-            }
+                Spacer(minLength: 8)
 
-            HStack(spacing: 8) {
-                Button("保存名称") {
-                    commitRename(profileID: profile.id)
+                if let label = usage?.remainingLabel, usage?.status == .ready {
+                    Text(label)
+                        .font(.body.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(usageColor(usage?.severity))
                 }
-                .disabled(!canCommitRename(profile))
 
-                Button {
-                    store.openTerminal(for: profile)
+                Menu {
+                    Button("重命名") {
+                        beginRename(profile)
+                    }
+                    Button("打开终端") {
+                        store.openTerminal(for: profile)
+                    }
+                    Divider()
+                    Button("删除…", role: .destructive) {
+                        profilePendingDelete = profile
+                    }
+                    .disabled(!canDelete)
                 } label: {
-                    Label("打开终端", systemImage: "terminal")
+                    Image(systemName: "ellipsis.circle")
                 }
-
-                Spacer(minLength: 12)
-
-                Button("删除", role: .destructive) {
-                    profilePendingDelete = profile
-                }
-                .disabled(!canDelete)
-                .help(canDelete ? "删除此账号及其登录数据" : "至少保留一个账号")
+                .menuStyle(.borderlessButton)
+                .frame(width: 24)
+                .help(canDelete ? "更多操作" : "更多操作（至少保留一个账号）")
             }
-            .controlSize(.small)
-        }
-        .padding(14)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.55), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(
-                    isActive ? Color.accentColor.opacity(0.34) : Color(nsColor: .separatorColor).opacity(0.55),
-                    lineWidth: 1
-                )
+            .padding(.vertical, 11)
+            .accessibilityElement(children: .combine)
+
+            if isRenaming {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("显示名称", text: $renameDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($renameFieldFocused)
+                        .onSubmit { commitRename(profileID: profile.id) }
+                        .onAppear {
+                            renameFieldFocused = true
+                        }
+
+                    HStack(spacing: 8) {
+                        Spacer(minLength: 0)
+                        Button("取消") {
+                            cancelRename()
+                        }
+                        Button("完成") {
+                            commitRename(profileID: profile.id)
+                        }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.leading, 44)
+                .padding(.bottom, 12)
+            }
         }
     }
 
@@ -470,31 +510,53 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Rename helpers
+    // MARK: - Account helpers
 
-    private func canCommitRename(_ profile: Profile) -> Bool {
-        let draft = (renameDrafts[profile.id] ?? profile.name)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return !draft.isEmpty && draft != profile.name
+    private func loginStatusColor(_ identity: AccountIdentity?) -> Color {
+        guard let identity else {
+            return Color.orange.opacity(0.85)
+        }
+        if identity.hasBrokenAuthFile {
+            return Color.red.opacity(0.85)
+        }
+        if identity.isLoggedIn, !identity.isExpired {
+            return Color.green.opacity(0.85)
+        }
+        return Color.orange.opacity(0.85)
+    }
+
+    private func usageColor(_ severity: UsageSeverity?) -> Color {
+        switch severity {
+        case .ok:
+            return Color.green
+        case .warning:
+            return Color.orange
+        case .critical:
+            return Color.red
+        case .unknown, .none:
+            return Color.secondary
+        }
+    }
+
+    private func beginRename(_ profile: Profile) {
+        isAddingAccount = false
+        newProfileName = ""
+        renamingProfileID = profile.id
+        renameDraft = profile.name
+    }
+
+    private func cancelRename() {
+        renamingProfileID = nil
+        renameDraft = ""
+        renameFieldFocused = false
     }
 
     private func commitRename(profileID: String) {
-        let draft = renameDrafts[profileID] ?? ""
+        let draft = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !draft.isEmpty else { return }
         if store.renameProfile(id: profileID, name: draft) {
-            renameDrafts[profileID] = store.config.profiles
-                .first(where: { $0.id == profileID })?.name ?? draft
+            cancelRename()
         }
-    }
-
-    private func syncRenameDrafts(with profiles: [Profile]? = nil) {
-        let list = profiles ?? store.config.profiles
-        var drafts: [String: String] = [:]
-        // Re-seed from store so menu renames cannot be undone by stale Settings drafts.
-        // In-progress edits are lost when the profile list changes; acceptable for this UI.
-        for profile in list {
-            drafts[profile.id] = profile.name
-        }
-        renameDrafts = drafts
     }
 
     // MARK: - Terminal / project helpers
