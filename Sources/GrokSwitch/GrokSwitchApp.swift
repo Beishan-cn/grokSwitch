@@ -9,11 +9,11 @@ struct GrokSwitchApp: App {
             MenuBarView()
                 .environmentObject(store)
         } label: {
-            // Custom Grok brand mark + remaining ring (not the old swap SF Symbol).
+            // CodexBar-style brand mark (16pt template); remaining % is title text.
             HStack(spacing: 4) {
                 MenuBarIcon.image(usage: store.activeUsage)
                     .renderingMode(.template)
-                    .frame(width: 18, height: 18)
+                    .frame(width: 16, height: 16)
                 Text(store.menuBarTitle)
             }
         }
