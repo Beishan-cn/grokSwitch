@@ -64,7 +64,7 @@ struct MenuBarView: View {
             }
             if let active = store.activeProfile {
                 let identity = store.identities[active.id]
-                // Usage / GROK_HOME path live elsewhere (profile rows, 打开配置目录) so the
+                // Usage / GROK_HOME path live elsewhere (profile rows, Settings) so the
                 // header stays a compact identity summary.
                 Text(identity?.detailLabel ?? active.name)
                     .font(.caption)
@@ -378,16 +378,6 @@ struct MenuBarView: View {
                 openSettings()
             } label: {
                 labelRow(systemImage: "gearshape", title: "设置…")
-            }
-            .buttonStyle(MenuRowButtonStyle())
-            .padding(.horizontal, 4)
-
-            Button {
-                NSApp.activate(ignoringOtherApps: true)
-                // Reveal config folder
-                NSWorkspace.shared.open(Paths.grokSwitchRoot)
-            } label: {
-                labelRow(systemImage: "folder", title: "打开配置目录")
             }
             .buttonStyle(MenuRowButtonStyle())
             .padding(.horizontal, 4)

@@ -360,9 +360,18 @@ struct SettingsView: View {
 
     private var pathsSection: some View {
         SettingsSectionCard(title: "路径", systemImage: "point.topleft.down.to.point.bottomright.curvepath") {
-            VStack(spacing: 0) {
-                settingsValueRow(title: "配置目录", value: Paths.grokSwitchRoot.path)
-                    .padding(.bottom, 13)
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 10) {
+                    settingsValueRow(title: "配置目录", value: Paths.grokSwitchRoot.path)
+                    HStack(spacing: 8) {
+                        Button("打开配置目录") {
+                            NSWorkspace.shared.open(Paths.grokSwitchRoot)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.bottom, 13)
                 Divider()
                 settingsValueRow(title: "active.env", value: Paths.activeEnvFile.path)
                     .padding(.top, 13)
