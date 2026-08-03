@@ -31,6 +31,8 @@ struct GrokSwitchApp: App {
 struct SettingsView: View {
     @EnvironmentObject private var store: ProfileStore
     @State private var scannedProjects: [ProjectFolder] = []
+    @State private var profilePendingDelete: Profile?
+    @State private var renameDrafts: [String: String] = [:]
 
     private var installedTerminals: [TerminalApp] {
         TerminalApp.installed
@@ -38,6 +40,43 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                if store.config.profiles.isEmpty {
+                    Text("没有账号配置")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(store.config.profiles) { profile in
+                        accountManageRow(profile)
+                    }
+                }
+            } header: {
+                Text("账号")
+            } footer: {
+                Text("删除会移除该账号的 GROK_HOME 目录（含登录凭证），不可恢复。至少保留一个账号。也可在菜单栏点「管理账号…」。")
+                    .font(.caption)
+            }
+            .confirmationDialog(
+                deleteConfirmationTitle,
+                isPresented: Binding(
+                    get: { profilePendingDelete != nil },
+                    set: { if !$0 { profilePendingDelete = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("删除账号", role: .destructive) {
+                    if let profile = profilePendingDelete {
+                        _ = store.deleteProfile(id: profile.id)
+                        renameDrafts.removeValue(forKey: profile.id)
+                    }
+                    profilePendingDelete = nil
+                }
+                Button("取消", role: .cancel) {
+                    profilePendingDelete = nil
+                }
+            } message: {
+                Text("将永久删除该账号的本地登录数据。")
+            }
+
             Section("菜单栏") {
                 Toggle("在菜单栏显示剩余用量", isOn: Binding(
                     get: { store.config.showUsageInMenuBar },
@@ -150,8 +189,104 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440, height: 560)
+        .frame(width: 440, height: 640)
         .padding()
+        .onAppear {
+            syncRenameDrafts()
+        }
+        .onChange(of: store.config.profiles) { _, profiles in
+            syncRenameDrafts(with: profiles)
+        }
+    }
+
+    private var deleteConfirmationTitle: String {
+        if let name = profilePendingDelete?.name {
+            return "删除「\(name)」？"
+        }
+        return "删除账号？"
+    }
+
+    @ViewBuilder
+    private func accountManageRow(_ profile: Profile) -> some View {
+        let identity = store.identities[profile.id]
+        let isActive = store.activeProfile?.id == profile.id
+        let canDelete = store.config.profiles.count > 1
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                TextField(
+                    "显示名称",
+                    text: Binding(
+                        get: { renameDrafts[profile.id] ?? profile.name },
+                        set: { renameDrafts[profile.id] = $0 }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                .onSubmit {
+                    commitRename(profileID: profile.id)
+                }
+
+                if isActive {
+                    Text("当前")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text(identity?.detailLabel ?? "未登录")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+
+            HStack {
+                Button("保存名称") {
+                    commitRename(profileID: profile.id)
+                }
+                .disabled(!canCommitRename(profile))
+
+                Button("打开终端") {
+                    store.openTerminal(for: profile)
+                }
+
+                Spacer()
+
+                Button("删除", role: .destructive) {
+                    profilePendingDelete = profile
+                }
+                .disabled(!canDelete)
+                .help(canDelete ? "删除此账号及其登录数据" : "至少保留一个账号")
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func canCommitRename(_ profile: Profile) -> Bool {
+        let draft = (renameDrafts[profile.id] ?? profile.name)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return !draft.isEmpty && draft != profile.name
+    }
+
+    private func commitRename(profileID: String) {
+        let draft = renameDrafts[profileID] ?? ""
+        if store.renameProfile(id: profileID, name: draft) {
+            renameDrafts[profileID] = store.config.profiles
+                .first(where: { $0.id == profileID })?.name ?? draft
+        }
+    }
+
+    private func syncRenameDrafts(with profiles: [Profile]? = nil) {
+        let list = profiles ?? store.config.profiles
+        var drafts = renameDrafts
+        let ids = Set(list.map(\.id))
+        for key in drafts.keys where !ids.contains(key) {
+            drafts.removeValue(forKey: key)
+        }
+        for profile in list {
+            if drafts[profile.id] == nil {
+                drafts[profile.id] = profile.name
+            }
+        }
+        renameDrafts = drafts
     }
 
     /// Installed apps plus current selection (so a missing pick still appears).

@@ -173,6 +173,98 @@ final class ProfileStore: ObservableObject {
         }
     }
 
+    @discardableResult
+    func renameProfile(id: String, name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            lastError = "名称不能为空"
+            return false
+        }
+        guard let index = config.profiles.firstIndex(where: { $0.id == id }) else {
+            lastError = "找不到账号配置"
+            return false
+        }
+        if config.profiles[index].name == trimmed {
+            lastError = nil
+            return true
+        }
+        config.profiles[index].name = trimmed
+        do {
+            try saveConfig()
+            objectWillChange.send()
+            statusMessage = "已重命名为「\(trimmed)」"
+            lastError = nil
+            return true
+        } catch {
+            lastError = "重命名失败：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    /// Remove a profile from config and delete its GROK_HOME directory.
+    /// Refuses when it is the only remaining account.
+    @discardableResult
+    func deleteProfile(id: String) -> Bool {
+        guard config.profiles.count > 1 else {
+            lastError = "至少保留一个账号"
+            return false
+        }
+        guard let index = config.profiles.firstIndex(where: { $0.id == id }) else {
+            lastError = "找不到账号配置"
+            return false
+        }
+
+        let profile = config.profiles[index]
+        let wasActive = config.activeProfileID == profile.id
+        let previousConfig = config
+        let previousIdentities = identities
+        let previousUsages = usages
+
+        config.profiles.remove(at: index)
+        identities.removeValue(forKey: id)
+        usages.removeValue(forKey: id)
+
+        if wasActive {
+            config.activeProfileID = config.profiles.first?.id
+        }
+
+        do {
+            try saveConfig()
+            if wasActive, let fallback = activeProfile {
+                try writeActiveEnv(for: fallback)
+                _ = ShellHook.ensureInstalled()
+            }
+        } catch {
+            config = previousConfig
+            identities = previousIdentities
+            usages = previousUsages
+            lastError = "删除失败：\(error.localizedDescription)"
+            return false
+        }
+
+        var dataWarning: String?
+        if fm.fileExists(atPath: profile.homeURL.path) {
+            do {
+                try fm.removeItem(at: profile.homeURL)
+            } catch {
+                dataWarning = "账号已移除，但本地目录删除失败：\(error.localizedDescription)"
+            }
+        }
+
+        if let dataWarning {
+            statusMessage = nil
+            lastError = dataWarning
+        } else if wasActive, let fallback = activeProfile {
+            statusMessage = "已删除「\(profile.name)」，已切换到 \(fallback.name)"
+            lastError = nil
+        } else {
+            statusMessage = "已删除「\(profile.name)」"
+            lastError = nil
+        }
+        objectWillChange.send()
+        return true
+    }
+
     func openTerminal(for profile: Profile? = nil) {
         let target = profile ?? activeProfile
         guard let target else {

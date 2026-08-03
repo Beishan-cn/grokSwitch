@@ -6,6 +6,11 @@ struct MenuBarView: View {
     /// Inline expander for add-account form (sheet on MenuBarExtra breaks after focus loss).
     @State private var isAdding = false
     @State private var newProfileName = ""
+    /// Manage mode: rename / delete instead of switch-on-click.
+    @State private var isManaging = false
+    @State private var renamingProfileID: String?
+    @State private var renameDraft = ""
+    @State private var confirmingDeleteID: String?
     /// Inline expander for terminal list (sheet on MenuBarExtra is flaky and auto-closes).
     @State private var isChoosingTerminal = false
     /// Pending pick while the expander is open; committed only on 完成.
@@ -91,7 +96,16 @@ struct MenuBarView: View {
         }
     }
 
+    @ViewBuilder
     private func profileRow(_ profile: Profile) -> some View {
+        if isManaging {
+            manageProfileRow(profile)
+        } else {
+            switchProfileRow(profile)
+        }
+    }
+
+    private func switchProfileRow(_ profile: Profile) -> some View {
         let isActive = store.activeProfile?.id == profile.id
         let identity = store.identities[profile.id]
         let usage = store.usages[profile.id]
@@ -140,6 +154,103 @@ struct MenuBarView: View {
         .padding(.horizontal, 4)
     }
 
+    private func manageProfileRow(_ profile: Profile) -> some View {
+        let isActive = store.activeProfile?.id == profile.id
+        let identity = store.identities[profile.id]
+        let isRenaming = renamingProfileID == profile.id
+        let isConfirmingDelete = confirmingDeleteID == profile.id
+        let canDelete = store.config.profiles.count > 1
+
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: isActive ? "checkmark.circle.fill" : "person.crop.circle")
+                    .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+                    .font(.body)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(profile.name)
+                        .font(.body.weight(isActive ? .semibold : .regular))
+                    Text(identity?.detailLabel ?? "未登录")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Button("重命名") {
+                    isAdding = false
+                    newProfileName = ""
+                    confirmingDeleteID = nil
+                    renamingProfileID = profile.id
+                    renameDraft = profile.name
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button("删除", role: .destructive) {
+                    isAdding = false
+                    newProfileName = ""
+                    renamingProfileID = nil
+                    renameDraft = ""
+                    confirmingDeleteID = profile.id
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!canDelete)
+                .help(canDelete ? "删除此账号及其登录数据" : "至少保留一个账号")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
+            if isRenaming {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("显示名称", text: $renameDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { confirmRename(profileID: profile.id) }
+
+                    HStack(spacing: 8) {
+                        Button("取消") {
+                            renamingProfileID = nil
+                            renameDraft = ""
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("完成") { confirmRename(profileID: profile.id) }
+                            .buttonStyle(.borderedProminent)
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+
+            if isConfirmingDelete {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("删除「\(profile.name)」？将移除其 GROK_HOME（含登录凭证），不可恢复。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 8) {
+                        Button("取消") {
+                            confirmingDeleteID = nil
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("确认删除", role: .destructive) {
+                            confirmDelete(profileID: profile.id)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+
     private var actions: some View {
         VStack(spacing: 0) {
             Button {
@@ -159,9 +270,8 @@ struct MenuBarView: View {
                     // Collapse without saving
                     isChoosingTerminal = false
                 } else {
+                    collapseAccountEditors()
                     isChoosingProject = false
-                    isAdding = false
-                    newProfileName = ""
                     pendingTerminal = store.config.preferredTerminalApp
                     isChoosingTerminal = true
                 }
@@ -186,8 +296,7 @@ struct MenuBarView: View {
                     isChoosingProject = false
                 } else {
                     isChoosingTerminal = false
-                    isAdding = false
-                    newProfileName = ""
+                    collapseAccountEditors()
                     pendingProjectPath = store.config.preferredProjectPath
                     refreshScannedProjects()
                     isChoosingProject = true
@@ -209,27 +318,24 @@ struct MenuBarView: View {
             }
 
             Button {
-                if isAdding {
-                    // Collapse without saving
-                    isAdding = false
-                    newProfileName = ""
+                if isManaging {
+                    exitManageMode()
                 } else {
                     isChoosingTerminal = false
                     isChoosingProject = false
-                    newProfileName = ""
-                    isAdding = true
+                    isManaging = true
                 }
             } label: {
                 labelRow(
-                    systemImage: "plus.circle",
-                    title: isAdding ? "添加账号" : "添加账号…"
+                    systemImage: "person.crop.circle.badge.checkmark",
+                    title: isManaging ? "完成管理" : "管理账号…"
                 )
             }
             .buttonStyle(MenuRowButtonStyle())
             .padding(.horizontal, 4)
 
-            if isAdding {
-                addProfileInline
+            if isManaging {
+                manageAccountsInline
             }
 
             Button {
@@ -279,6 +385,35 @@ struct MenuBarView: View {
         }
     }
 
+    /// Account management extras under「管理账号」：add form lives here, not as a top-level action.
+    private var manageAccountsInline: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                if isAdding {
+                    isAdding = false
+                    newProfileName = ""
+                } else {
+                    renamingProfileID = nil
+                    renameDraft = ""
+                    confirmingDeleteID = nil
+                    newProfileName = ""
+                    isAdding = true
+                }
+            } label: {
+                labelRow(
+                    systemImage: "plus.circle",
+                    title: isAdding ? "添加账号" : "添加账号…"
+                )
+            }
+            .buttonStyle(MenuRowButtonStyle())
+            .padding(.horizontal, 4)
+
+            if isAdding {
+                addProfileInline
+            }
+        }
+    }
+
     /// Inline form under the menu (no sheet — MenuBarExtra sheets break after focus loss).
     private var addProfileInline: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -318,6 +453,36 @@ struct MenuBarView: View {
             _ = store.switchTo(profileID: profile.id)
             store.openTerminal(for: profile)
         }
+    }
+
+    private func confirmRename(profileID: String) {
+        if store.renameProfile(id: profileID, name: renameDraft) {
+            renamingProfileID = nil
+            renameDraft = ""
+        }
+    }
+
+    private func confirmDelete(profileID: String) {
+        if store.deleteProfile(id: profileID) {
+            confirmingDeleteID = nil
+            if renamingProfileID == profileID {
+                renamingProfileID = nil
+                renameDraft = ""
+            }
+        }
+    }
+
+    private func exitManageMode() {
+        isManaging = false
+        isAdding = false
+        newProfileName = ""
+        renamingProfileID = nil
+        renameDraft = ""
+        confirmingDeleteID = nil
+    }
+
+    private func collapseAccountEditors() {
+        exitManageMode()
     }
 
     /// Inline list under the menu (no sheet — avoids MenuBarExtra auto-dismiss).
