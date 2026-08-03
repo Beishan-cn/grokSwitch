@@ -79,12 +79,19 @@ struct ProfileUsage: Equatable, Sendable {
             let mins = max(1, Int(seconds / 60))
             return "\(mins)m 后重置"
         }
-        if seconds < 48 * 3600 {
-            let hours = Int((seconds / 3600).rounded())
+        // Under 1 day: hours only (e.g. `18h 后重置`)
+        if seconds < 86400 {
+            let hours = max(1, Int(seconds / 3600))
             return "\(hours)h 后重置"
         }
-        let days = Int((seconds / 86400).rounded())
-        return "\(days)d 后重置"
+        // 1 day+: days + remaining hours (e.g. `6d 5h 后重置`)
+        let totalHours = Int(seconds / 3600)
+        let days = totalHours / 24
+        let hours = totalHours % 24
+        if hours == 0 {
+            return "\(days)d 后重置"
+        }
+        return "\(days)d \(hours)h 后重置"
     }
 
     /// Color hint: green plenty / orange mid / red low.
