@@ -24,6 +24,7 @@ struct GrokSwitchApp: App {
 
 struct SettingsView: View {
     @EnvironmentObject private var store: ProfileStore
+    @State private var scannedProjects: [ProjectFolder] = []
 
     private var installedTerminals: [TerminalApp] {
         TerminalApp.installed
@@ -60,6 +61,39 @@ struct SettingsView: View {
                 Text("「用当前账号打开 Grok」会使用此终端启动。支持 Terminal、iTerm2、Ghostty、Otty、Warp、Alacritty、Kitty、WezTerm 等。")
                     .font(.caption)
             }
+            Section {
+                Picker("默认项目", selection: Binding(
+                    get: { store.config.preferredProjectPath ?? "" },
+                    set: { newValue in
+                        store.setPreferredProjectPath(newValue.isEmpty ? nil : newValue)
+                    }
+                )) {
+                    Text("未选择").tag("")
+                    ForEach(scannedProjects) { project in
+                        Text(project.name).tag(project.path)
+                    }
+                    // Keep current selection if it is outside the scan root.
+                    if let current = store.config.preferredProjectPath,
+                       !current.isEmpty,
+                       !scannedProjects.contains(where: { $0.path == current }) {
+                        Text("\((current as NSString).lastPathComponent)（当前）").tag(current)
+                    }
+                }
+                if let path = store.config.preferredProjectPath, !path.isEmpty {
+                    Text(path)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            } header: {
+                Text("项目")
+            } footer: {
+                Text("自动扫描 ~/Projects 下的文件夹。「用当前账号打开 Grok」会以 grok --cwd 进入所选项目。")
+                    .font(.caption)
+            }
+            .onAppear {
+                scannedProjects = ProjectScanner.scan()
+            }
             Section("路径") {
                 LabeledContent("配置目录") {
                     Text(Paths.grokSwitchRoot.path)
@@ -79,7 +113,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440, height: 360)
+        .frame(width: 440, height: 420)
         .padding()
     }
 

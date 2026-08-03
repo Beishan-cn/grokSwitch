@@ -9,6 +9,11 @@ struct MenuBarView: View {
     @State private var isChoosingTerminal = false
     /// Pending pick while the expander is open; committed only on 完成.
     @State private var pendingTerminal: TerminalApp = .terminal
+    /// Inline expander for project list under ~/Projects.
+    @State private var isChoosingProject = false
+    /// Pending project path (`nil` = no project). Committed only on 完成.
+    @State private var pendingProjectPath: String? = nil
+    @State private var scannedProjects: [ProjectFolder] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -130,7 +135,7 @@ struct MenuBarView: View {
                 labelRow(
                     systemImage: "terminal",
                     title: "用当前账号打开 Grok",
-                    subtitle: store.config.preferredTerminalApp.displayName
+                    subtitle: openGrokSubtitle
                 )
             }
             .buttonStyle(MenuRowButtonStyle())
@@ -141,6 +146,7 @@ struct MenuBarView: View {
                     // Collapse without saving
                     isChoosingTerminal = false
                 } else {
+                    isChoosingProject = false
                     pendingTerminal = store.config.preferredTerminalApp
                     isChoosingTerminal = true
                 }
@@ -158,6 +164,31 @@ struct MenuBarView: View {
 
             if isChoosingTerminal {
                 terminalPickerInline
+            }
+
+            Button {
+                if isChoosingProject {
+                    isChoosingProject = false
+                } else {
+                    isChoosingTerminal = false
+                    pendingProjectPath = store.config.preferredProjectPath
+                    scannedProjects = ProjectScanner.scan()
+                    isChoosingProject = true
+                }
+            } label: {
+                labelRow(
+                    systemImage: "folder",
+                    title: isChoosingProject ? "默认项目" : "默认项目…",
+                    subtitle: isChoosingProject
+                        ? projectDisplayName(pendingProjectPath)
+                        : store.config.preferredProjectDisplayName
+                )
+            }
+            .buttonStyle(MenuRowButtonStyle())
+            .padding(.horizontal, 4)
+
+            if isChoosingProject {
+                projectPickerInline
             }
 
             Button {
@@ -325,6 +356,130 @@ struct MenuBarView: View {
         return list.sorted {
             (order.firstIndex(of: $0) ?? 0) < (order.firstIndex(of: $1) ?? 0)
         }
+    }
+
+    /// Inline project list under the menu (same pattern as terminal picker).
+    private var projectPickerInline: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("扫描 \(shortProjectsRoot) · 点选后按「完成」保存")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 16)
+                .padding(.top, 2)
+                .padding(.bottom, 4)
+
+            // None option
+            Button {
+                pendingProjectPath = nil
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: pendingProjectPath == nil ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(pendingProjectPath == nil ? Color.accentColor : Color.secondary)
+                        .frame(width: 16)
+                    Text("未选择")
+                        .font(.body.weight(pendingProjectPath == nil ? .semibold : .regular))
+                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(MenuRowButtonStyle())
+            .padding(.horizontal, 12)
+
+            if scannedProjects.isEmpty {
+                Text("未找到项目文件夹")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 6)
+            } else {
+                // Cap height with a scrollable-feel list; MenuBarExtra windows are limited.
+                ForEach(scannedProjects) { project in
+                    let isSelected = pendingProjectPath == project.path
+                    Button {
+                        pendingProjectPath = project.path
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                                .frame(width: 16)
+                            Text(project.name)
+                                .font(.body.weight(isSelected ? .semibold : .regular))
+                                .lineLimit(1)
+                            Spacer(minLength: 8)
+                        }
+                        .contentShape(Rectangle())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(MenuRowButtonStyle())
+                    .padding(.horizontal, 12)
+                }
+            }
+
+            // Keep a saved path visible if it is outside ~/Projects or was renamed.
+            if let pending = pendingProjectPath,
+               !scannedProjects.contains(where: { $0.path == pending }) {
+                let name = (pending as NSString).lastPathComponent
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 16)
+                    Text(name)
+                        .font(.body.weight(.semibold))
+                    Spacer(minLength: 8)
+                    Text("当前")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+            }
+
+            HStack(spacing: 8) {
+                Button("取消") {
+                    isChoosingProject = false
+                }
+                .buttonStyle(.bordered)
+
+                Button("完成") {
+                    store.setPreferredProjectPath(pendingProjectPath)
+                    isChoosingProject = false
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+            .padding(.bottom, 4)
+        }
+        .padding(.bottom, 4)
+    }
+
+    private var shortProjectsRoot: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let path = ProjectScanner.projectsRoot.path
+        if path.hasPrefix(home) {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
+    }
+
+    private func projectDisplayName(_ path: String?) -> String {
+        guard let path, !path.isEmpty else { return "未选择" }
+        return (path as NSString).lastPathComponent
+    }
+
+    private var openGrokSubtitle: String {
+        let terminal = store.config.preferredTerminalApp.displayName
+        if let path = store.config.preferredProjectPath, !path.isEmpty {
+            return "\(terminal) · \((path as NSString).lastPathComponent)"
+        }
+        return terminal
     }
 
     private func labelRow(systemImage: String, title: String, subtitle: String? = nil) -> some View {

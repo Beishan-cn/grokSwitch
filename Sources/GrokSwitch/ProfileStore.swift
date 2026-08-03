@@ -136,9 +136,15 @@ final class ProfileStore: ObservableObject {
             return
         }
         let terminal = config.preferredTerminalApp
+        let project = config.preferredProjectPath
         do {
-            try TerminalLauncher.open(profile: target, terminal: terminal)
-            statusMessage = "已用 \(terminal.displayName) 打开：\(target.name)"
+            try TerminalLauncher.open(profile: target, terminal: terminal, projectPath: project)
+            if let project, !project.isEmpty {
+                let name = (project as NSString).lastPathComponent
+                statusMessage = "已用 \(terminal.displayName) 打开：\(target.name) · \(name)"
+            } else {
+                statusMessage = "已用 \(terminal.displayName) 打开：\(target.name)"
+            }
             lastError = nil
         } catch {
             lastError = "打开终端失败：\(error.localizedDescription)"
@@ -157,10 +163,37 @@ final class ProfileStore: ObservableObject {
         }
     }
 
+    /// Set preferred project path for `grok --cwd`. Pass `nil` to clear (no repo).
+    func setPreferredProjectPath(_ path: String?) {
+        let normalized: String?
+        if let path, !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            normalized = (path as NSString).expandingTildeInPath
+        } else {
+            normalized = nil
+        }
+        config.preferredProjectPath = normalized
+        do {
+            try saveConfig()
+            objectWillChange.send()
+            if let path = normalized {
+                let name = (path as NSString).lastPathComponent
+                statusMessage = "默认项目已设为 \(name)"
+            } else {
+                statusMessage = "已清除默认项目"
+            }
+            lastError = nil
+        } catch {
+            lastError = "保存设置失败：\(error.localizedDescription)"
+        }
+    }
+
     func copyLaunchCommand(for profile: Profile? = nil) {
         let target = profile ?? activeProfile
         guard let target else { return }
-        let cmd = TerminalLauncher.launchCommand(profile: target)
+        let cmd = TerminalLauncher.launchCommand(
+            profile: target,
+            projectPath: config.preferredProjectPath
+        )
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(cmd, forType: .string)

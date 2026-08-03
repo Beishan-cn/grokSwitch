@@ -112,23 +112,27 @@ enum TerminalLauncher {
         }
     }
 
-    static func launchCommand(profile: Profile) -> String {
+    /// Build the shell command that launches grok with the profile's GROK_HOME
+    /// and optional working directory (`--cwd`).
+    static func launchCommand(profile: Profile, projectPath: String? = nil) -> String {
         let home = shellEscape(profile.homeURL.path)
         let binary = Paths.resolveGrokBinary()
+        let cwdArg = cwdArgument(projectPath)
         if binary.lastPathComponent == "env" {
-            return "GROK_HOME=\(home) grok"
+            return "GROK_HOME=\(home) grok\(cwdArg)"
         }
-        return "GROK_HOME=\(home) \(shellEscape(binary.path))"
+        return "GROK_HOME=\(home) \(shellEscape(binary.path))\(cwdArg)"
     }
 
-    static func open(profile: Profile, terminal: TerminalApp) throws {
+    static func open(profile: Profile, terminal: TerminalApp, projectPath: String? = nil) throws {
         let home = profile.homeURL.path
         let binary = Paths.resolveGrokBinary()
+        let cwdArg = cwdArgument(projectPath)
         let command: String
         if binary.lastPathComponent == "env" {
-            command = "export GROK_HOME=\(shellEscape(home)); exec grok"
+            command = "export GROK_HOME=\(shellEscape(home)); exec grok\(cwdArg)"
         } else {
-            command = "export GROK_HOME=\(shellEscape(home)); exec \(shellEscape(binary.path))"
+            command = "export GROK_HOME=\(shellEscape(home)); exec \(shellEscape(binary.path))\(cwdArg)"
         }
 
         switch terminal {
@@ -316,6 +320,21 @@ enum TerminalLauncher {
     }
 
     // MARK: - Helpers
+
+    /// Returns ` --cwd '…'` when a valid project path is set, otherwise empty.
+    private static func cwdArgument(_ projectPath: String?) -> String {
+        guard let raw = projectPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return ""
+        }
+        let expanded = (raw as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir),
+              isDir.boolValue else {
+            return ""
+        }
+        return " --cwd \(shellEscape(expanded))"
+    }
 
     private static func runAppleScript(_ source: String) throws {
         var error: NSDictionary?
