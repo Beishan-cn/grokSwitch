@@ -1,13 +1,21 @@
 import Foundation
 
+/// Installs a small block into `~/.zshrc` that sources GrokSwitch `active.env`.
+/// MVP: zsh only. bash/fish users must source `~/.grokswitch/active.env` manually.
 enum ShellHook {
     static let beginMarker = "# >>> grokswitch >>>"
     static let endMarker = "# <<< grokswitch <<<"
 
+    enum InstallResult: Equatable {
+        case alreadyUpToDate
+        case modified
+        case failed(String)
+    }
+
     static var hookBlock: String {
         """
         \(beginMarker)
-        # GrokSwitch: apply active GROK_HOME for new shells
+        # GrokSwitch: apply active GROK_HOME for new shells (zsh only)
         if [ -f "$HOME/.grokswitch/active.env" ]; then
           . "$HOME/.grokswitch/active.env"
         fi
@@ -15,9 +23,9 @@ enum ShellHook {
         """
     }
 
-    /// Ensure ~/.zshrc sources GrokSwitch active.env. Returns true if file was modified.
+    /// Ensure ~/.zshrc sources GrokSwitch active.env.
     @discardableResult
-    static func ensureInstalled() -> Bool {
+    static func ensureInstalled() -> InstallResult {
         let zshrc = Paths.zshrc
         let fm = FileManager.default
 
@@ -25,45 +33,56 @@ enum ShellHook {
             let content = hookBlock + "\n"
             do {
                 try content.write(to: zshrc, atomically: true, encoding: .utf8)
-                return true
+                return .modified
             } catch {
-                return false
+                return .failed("无法创建 ~/.zshrc：\(error.localizedDescription)")
             }
         }
 
-        guard var existing = try? String(contentsOf: zshrc, encoding: .utf8) else {
-            return false
+        guard let existing = try? String(contentsOf: zshrc, encoding: .utf8) else {
+            return .failed("无法读取 ~/.zshrc")
         }
 
-        if existing.contains(beginMarker), existing.contains(endMarker) {
-            // Already installed — refresh block in case format changed
-            if let updated = replaceBlock(in: existing) {
-                if updated != existing {
-                    try? updated.write(to: zshrc, atomically: true, encoding: .utf8)
-                    return true
-                }
+        if existing.contains(beginMarker) || existing.contains(endMarker) {
+            guard let updated = replaceBlock(in: existing) else {
+                // Markers present but malformed — do not append a second block or corrupt the file.
+                return .failed("检测到损坏的 grokswitch hook 标记（顺序异常或不成对），未修改 ~/.zshrc。请手动删除 # >>> grokswitch >>> … # <<< grokswitch <<< 块后重试。")
             }
-            return false
+            if updated == existing {
+                return .alreadyUpToDate
+            }
+            do {
+                try updated.write(to: zshrc, atomically: true, encoding: .utf8)
+                return .modified
+            } catch {
+                return .failed("无法写入 ~/.zshrc：\(error.localizedDescription)")
+            }
         }
 
-        if !existing.hasSuffix("\n") {
-            existing += "\n"
+        var next = existing
+        if !next.hasSuffix("\n") {
+            next += "\n"
         }
-        existing += "\n" + hookBlock + "\n"
+        next += "\n" + hookBlock + "\n"
         do {
-            try existing.write(to: zshrc, atomically: true, encoding: .utf8)
-            return true
+            try next.write(to: zshrc, atomically: true, encoding: .utf8)
+            return .modified
         } catch {
-            return false
+            return .failed("无法写入 ~/.zshrc：\(error.localizedDescription)")
         }
     }
 
-    private static func replaceBlock(in text: String) -> String? {
+    /// Replace the first well-ordered begin…end block. Returns nil if markers are malformed.
+    static func replaceBlock(in text: String) -> String? {
         guard let startRange = text.range(of: beginMarker),
-              let endRange = text.range(of: endMarker) else {
+              let endRange = text.range(of: endMarker)
+        else {
             return nil
         }
-        // Expand end to end of line
+        // Require begin strictly before end to avoid illegal Range / swallowing mid-file content.
+        guard startRange.lowerBound < endRange.lowerBound else {
+            return nil
+        }
         let afterEnd = endRange.upperBound
         let lineEnd: String.Index
         if let nl = text[afterEnd...].firstIndex(of: "\n") {
