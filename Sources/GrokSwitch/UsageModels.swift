@@ -149,6 +149,8 @@ struct ProfileUsage: Equatable, Sendable {
             return .notLoggedIn()
         case .expiredCredentials:
             return .expired()
+        case .authParseFailed:
+            return .failed(error.errorDescription ?? "auth.json 无法解析")
         case .teamUsageUnsupported:
             return .teamUnsupported()
         case .requestFailed(status: 401, _), .requestFailed(status: 403, _):

@@ -7,11 +7,13 @@ enum UsageFetcher {
     static let endpoint = URL(string: "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig")!
     private static let timeout: TimeInterval = 15
 
-    enum FetchError: LocalizedError, Equatable {
+    enum FetchError: LocalizedError, Equatable, Sendable {
         case missingCredentials
         case expiredCredentials
+        case authParseFailed(String)
         case emptyResponse
         case invalidResponse
+        case truncatedResponse
         case requestFailed(status: Int, body: String)
         case rpcFailed(status: Int, message: String)
         case teamUsageUnsupported
@@ -24,16 +26,20 @@ enum UsageFetcher {
                 return "未登录：请运行 grok login"
             case .expiredCredentials:
                 return "登录已过期：请重新 grok login"
+            case let .authParseFailed(message):
+                return "auth.json 无法解析：\(message)"
             case .emptyResponse:
                 return "用量接口返回空数据"
             case .invalidResponse:
                 return "用量接口响应无效"
-            case let .requestFailed(status, body):
+            case .truncatedResponse:
+                return "用量响应被截断"
+            case let .requestFailed(status, _):
                 if status == 401 || status == 403 {
                     return "认证失败：请重新 grok login"
                 }
-                let snippet = body.prefix(120)
-                return "用量请求失败 HTTP \(status)\(snippet.isEmpty ? "" : ": \(snippet)")"
+                // Do not surface raw body snippets in the menu UI.
+                return "用量请求失败 HTTP \(status)"
             case let .rpcFailed(status, message):
                 if status == 16 || Self.isAuthRPC(status: status, message: message) {
                     return "认证失败：请重新 grok login"
@@ -73,6 +79,15 @@ enum UsageFetcher {
         var resetsAt: Date?
     }
 
+    /// Ephemeral session: no shared URL cache / cookies for bearer traffic.
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = timeout
+        config.timeoutIntervalForResource = timeout
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }()
+
     /// Fetch usage for a profile's `auth.json`.
     static func fetch(authURL: URL) async -> Result<RawUsage, FetchError> {
         let credentials: GrokCredentials
@@ -82,8 +97,10 @@ enum UsageFetcher {
             return .failure(.missingCredentials)
         } catch AuthReader.Error.missingTokens {
             return .failure(.missingCredentials)
+        } catch let AuthReader.Error.decodeFailed(message) {
+            return .failure(.authParseFailed(message))
         } catch {
-            return .failure(.missingCredentials)
+            return .failure(.authParseFailed(error.localizedDescription))
         }
 
         if credentials.isExpired {
@@ -131,10 +148,11 @@ enum UsageFetcher {
         request.setValue("1", forHTTPHeaderField: "x-grpc-web")
         request.setValue("connect-es/2.1.1", forHTTPHeaderField: "x-user-agent")
         request.setValue("GrokSwitch", forHTTPHeaderField: "User-Agent")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             throw FetchError.network(error.localizedDescription)
         }
@@ -189,22 +207,37 @@ enum UsageFetcher {
 
     // MARK: - gRPC-web framing
 
+    /// Heuristic parse of GetGrokCreditsConfig gRPC-web body.
+    /// Percent: prefer finite fixed32 floats in [0,100] whose path ends with field 1 and starts with [1,…].
+    /// Reset: prefer path [1,5,1] unix seconds; allow ~120s past grace for clock skew.
     static func parseGRPCWebResponse(_ data: Data, now: Date = Date()) throws -> RawUsage {
-        var payloads = grpcWebDataFrames(from: data)
+        if data.isEmpty { throw FetchError.emptyResponse }
+
+        let frameResult = grpcWebDataFrames(from: data)
+        var payloads = frameResult.frames.filter { !$0.isEmpty }
         if payloads.isEmpty, looksLikeProtobufPayload(data) {
             payloads = [data]
         }
-        guard !payloads.isEmpty else { throw FetchError.emptyResponse }
+        if payloads.isEmpty {
+            if frameResult.truncated {
+                throw FetchError.truncatedResponse
+            }
+            throw FetchError.emptyResponse
+        }
 
         var scan = ProtobufScan()
         for payload in payloads {
             scan.merge(scanProtobuf(payload, depth: 0))
         }
 
-        let parsedPercent = scan.fixed32Fields
-            .filter { field in
-                field.path.last == 1 && field.value.isFinite && field.value >= 0 && field.value <= 100
-            }
+        let percentCandidates = scan.fixed32Fields.filter { field in
+            field.path.last == 1
+                && field.path.first == 1
+                && field.value.isFinite
+                && field.value >= 0
+                && field.value <= 100
+        }
+        let parsedPercent = percentCandidates
             .min { lhs, rhs in
                 lhs.path.count == rhs.path.count ? lhs.order < rhs.order : lhs.path.count < rhs.path.count
             }
@@ -215,19 +248,22 @@ enum UsageFetcher {
             guard raw >= 1_700_000_000, raw <= 2_100_000_000 else { return nil }
             return (field.path, Date(timeIntervalSince1970: TimeInterval(raw)))
         }
-        let futureResetFields = resetFields.filter { $0.date > now }
-        let reset = futureResetFields
+        // Allow slight past timestamps (clock skew) so UI can show “已重置”.
+        let grace: TimeInterval = 120
+        let usableResetFields = resetFields.filter { $0.date > now.addingTimeInterval(-grace) }
+        let preferredReset = usableResetFields
             .filter { $0.path == [1, 5, 1] }
             .map(\.date)
             .min()
-            ?? futureResetFields.map(\.date).min()
+        let reset = preferredReset ?? usableResetFields.map(\.date).min()
 
         let hasUsagePeriod = scan.varintFields.contains { field in
             field.path.starts(with: [1, 6])
                 || (field.path == [1, 8, 1] && (field.value == 1 || field.value == 2))
         }
+        // Base noUsageYet on “no percent candidate”, not “no fixed32 at all”.
         let noUsageYet = parsedPercent == nil
-            && scan.fixed32Fields.isEmpty
+            && percentCandidates.isEmpty
             && reset != nil
             && hasUsagePeriod
 
@@ -244,26 +280,45 @@ enum UsageFetcher {
         return fieldNumber > 0 && (wireType == 0 || wireType == 1 || wireType == 2 || wireType == 5)
     }
 
-    private static func grpcWebDataFrames(from data: Data) -> [Data] {
+    private struct FrameParseResult {
+        var frames: [Data]
+        var truncated: Bool
+    }
+
+    /// Collect complete data frames. On incomplete trailing header/body, keep frames
+    /// already parsed (do not discard them as empty).
+    private static func grpcWebDataFrames(from data: Data) -> FrameParseResult {
         let bytes = [UInt8](data)
         var frames: [Data] = []
         var index = 0
+        var truncated = false
+        let maxFrameLength = 4 * 1024 * 1024
         while index < bytes.count {
-            guard index + 5 <= bytes.count else { return [] }
+            guard index + 5 <= bytes.count else {
+                truncated = true
+                break
+            }
             let flags = bytes[index]
             let length = (Int(bytes[index + 1]) << 24)
                 | (Int(bytes[index + 2]) << 16)
                 | (Int(bytes[index + 3]) << 8)
                 | Int(bytes[index + 4])
             let start = index + 5
+            if length < 0 || length > maxFrameLength {
+                truncated = true
+                break
+            }
             let end = start + length
-            guard length >= 0, end <= bytes.count else { return [] }
-            if flags & 0x80 == 0 {
+            guard end <= bytes.count else {
+                truncated = true
+                break
+            }
+            if flags & 0x80 == 0, length > 0 {
                 frames.append(Data(bytes[start..<end]))
             }
             index = end
         }
-        return frames
+        return FrameParseResult(frames: frames, truncated: truncated)
     }
 
     private static func validateGRPCWebTrailers(_ data: Data) throws {

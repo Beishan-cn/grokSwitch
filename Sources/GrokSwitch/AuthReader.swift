@@ -30,6 +30,38 @@ struct GrokCredentials: Equatable, Sendable {
     }
 }
 
+/// Why identity is not usable when `isLoggedIn == false` and auth.json is present.
+enum AccountAuthIssue: Equatable, Sendable {
+    /// File missing — true “not logged in”.
+    case notFound
+    /// File exists but JSON/parse failed.
+    case unreadable(String)
+    /// File exists and parses, but no usable bearer token entry.
+    case missingTokens
+
+    var usageFailureMessage: String {
+        switch self {
+        case .notFound:
+            return "未登录：请运行 grok login"
+        case let .unreadable(message):
+            return "auth.json 无法解析：\(message)"
+        case .missingTokens:
+            return "auth.json 中没有可用 token"
+        }
+    }
+
+    var detailLabel: String {
+        switch self {
+        case .notFound:
+            return "未登录（运行 grok login）"
+        case .unreadable:
+            return "auth.json 损坏或无法解析"
+        case .missingTokens:
+            return "未登录（无可用 token，运行 grok login）"
+        }
+    }
+}
+
 struct AccountIdentity: Equatable {
     var email: String?
     var displayName: String?
@@ -37,6 +69,8 @@ struct AccountIdentity: Equatable {
     var isLoggedIn: Bool
     var isExpired: Bool
     var isTeamPrincipal: Bool
+    /// Set when credentials could not be loaded. Distinguishes missing file vs broken auth.json.
+    var authIssue: AccountAuthIssue?
 
     init(
         email: String? = nil,
@@ -44,7 +78,8 @@ struct AccountIdentity: Equatable {
         userID: String? = nil,
         isLoggedIn: Bool = false,
         isExpired: Bool = false,
-        isTeamPrincipal: Bool = false
+        isTeamPrincipal: Bool = false,
+        authIssue: AccountAuthIssue? = nil
     ) {
         self.email = email
         self.displayName = displayName
@@ -52,6 +87,7 @@ struct AccountIdentity: Equatable {
         self.isLoggedIn = isLoggedIn
         self.isExpired = isExpired
         self.isTeamPrincipal = isTeamPrincipal
+        self.authIssue = authIssue
     }
 
     init(credentials: GrokCredentials) {
@@ -61,6 +97,13 @@ struct AccountIdentity: Equatable {
         self.isLoggedIn = credentials.isLoggedIn
         self.isExpired = credentials.isExpired
         self.isTeamPrincipal = credentials.isTeamPrincipal
+        self.authIssue = nil
+    }
+
+    /// auth.json exists but is broken (not merely “never logged in”).
+    var hasBrokenAuthFile: Bool {
+        if case .unreadable = authIssue { return true }
+        return false
     }
 
     var shortLabel: String {
@@ -70,6 +113,9 @@ struct AccountIdentity: Equatable {
         }
         if let displayName, !displayName.isEmpty {
             return displayName
+        }
+        if case .unreadable = authIssue {
+            return "凭证损坏"
         }
         return "未登录"
     }
@@ -83,6 +129,9 @@ struct AccountIdentity: Equatable {
         }
         if let displayName, !displayName.isEmpty {
             return displayName
+        }
+        if let authIssue {
+            return authIssue.detailLabel
         }
         return "未登录（运行 grok login）"
     }
@@ -112,12 +161,20 @@ enum AuthReader {
     static let legacySessionScope = "https://accounts.x.ai/sign-in"
 
     /// Read non-secret identity fields from a profile's auth.json.
+    /// Distinguishes missing file vs present-but-broken credentials.
     static func identity(at authURL: URL) -> AccountIdentity {
         do {
             let credentials = try credentials(at: authURL)
             return AccountIdentity(credentials: credentials)
+        } catch Error.notFound {
+            return AccountIdentity(authIssue: .notFound)
+        } catch let Error.decodeFailed(message) {
+            return AccountIdentity(authIssue: .unreadable(message))
+        } catch Error.missingTokens {
+            return AccountIdentity(authIssue: .missingTokens)
         } catch {
-            return AccountIdentity()
+            // File likely exists but read/IO failed — treat as unreadable, not “never logged in”.
+            return AccountIdentity(authIssue: .unreadable(error.localizedDescription))
         }
     }
 
@@ -151,7 +208,7 @@ enum AuthReader {
         let first = (entry["first_name"] as? String)?.nilIfEmpty
         let last = (entry["last_name"] as? String)?.nilIfEmpty
         let nameParts = [first, last].compactMap { $0 }
-        let displayName = nameParts.isEmpty ? nil : nameParts.joined(separator: "")
+        let displayName = nameParts.isEmpty ? nil : nameParts.joined(separator: " ")
 
         return GrokCredentials(
             accessToken: key,
@@ -169,23 +226,65 @@ enum AuthReader {
     }
 
     private static func selectPreferredEntry(in root: [String: Any]) -> (scope: String, entry: [String: Any])? {
-        var oidcCandidate: (String, [String: Any])?
-        var legacyCandidate: (String, [String: Any])?
-        var otherCandidate: (String, [String: Any])?
+        struct Candidate {
+            var scope: String
+            var entry: [String: Any]
+            var rank: Int // 0 OIDC, 1 legacy, 2 other
+            var expiresAt: Date?
+            var isExpired: Bool
+        }
 
+        var candidates: [Candidate] = []
         for (scope, value) in root {
             guard let entry = value as? [String: Any] else { continue }
             // Only accept entries that carry a usable bearer token.
             guard let key = entry["key"] as? String, !key.isEmpty else { continue }
+            let rank: Int
             if scope.hasPrefix(oidcScopePrefix) {
-                oidcCandidate = (scope, entry)
+                rank = 0
             } else if scope == legacySessionScope || scope.contains("/sign-in") {
-                legacyCandidate = (scope, entry)
-            } else if otherCandidate == nil {
-                otherCandidate = (scope, entry)
+                rank = 1
+            } else {
+                rank = 2
+            }
+            let expiresAt = parseDate(entry["expires_at"])
+            let expired: Bool
+            if let expiresAt {
+                expired = Date() >= expiresAt.addingTimeInterval(-30)
+            } else {
+                expired = false // unknown expiry ≠ expired
+            }
+            candidates.append(Candidate(
+                scope: scope,
+                entry: entry,
+                rank: rank,
+                expiresAt: expiresAt,
+                isExpired: expired
+            ))
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        // Prefer non-expired, then OIDC > legacy > other, then latest expiresAt.
+        let sorted = candidates.sorted { lhs, rhs in
+            if lhs.isExpired != rhs.isExpired {
+                return !lhs.isExpired && rhs.isExpired
+            }
+            if lhs.rank != rhs.rank {
+                return lhs.rank < rhs.rank
+            }
+            switch (lhs.expiresAt, rhs.expiresAt) {
+            case let (l?, r?):
+                return l > r
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return false
             }
         }
-        return oidcCandidate ?? legacyCandidate ?? otherCandidate
+        let best = sorted[0]
+        return (best.scope, best.entry)
     }
 
     private static func parseDate(_ raw: Any?) -> Date? {
