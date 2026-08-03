@@ -209,21 +209,25 @@ struct SettingsView: View {
             systemImage: "menubar.rectangle",
             footer: "菜单栏默认只显示 Grok 图标与剩余百分比；开启上方开关后，在无用量数据时显示账号短名。账号名始终可在下拉列表中查看。用量按每个账号的 auth.json 独立查询。"
         ) {
-            VStack(spacing: 0) {
-                Toggle("在菜单栏显示剩余用量", isOn: Binding(
+            // Two related toggles side-by-side — fills the card without the sparse two-row list look.
+            HStack(alignment: .center, spacing: 20) {
+                Toggle("显示剩余用量", isOn: Binding(
                     get: { store.config.showUsageInMenuBar },
                     set: { store.setShowUsageInMenuBar($0) }
                 ))
-                .settingsControlRow()
+                .help("在菜单栏显示当前账号的剩余用量百分比")
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                Divider()
-
-                Toggle("无用量数据时显示账号短名", isOn: Binding(
+                Toggle("无用量时显示短名", isOn: Binding(
                     get: { store.config.showEmailInMenuBar },
                     set: { store.setShowEmailInMenuBar($0) }
                 ))
-                .settingsControlRow()
+                .help("无用量数据时在菜单栏显示账号短名；账号名始终可在下拉列表中查看")
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .controlSize(.regular)
+            .toggleStyle(.checkbox)
+            .padding(.vertical, 4)
         }
     }
 
