@@ -61,22 +61,12 @@ struct MenuBarView: View {
             }
             if let active = store.activeProfile {
                 let identity = store.identities[active.id]
-                let usage = store.usages[active.id]
+                // Usage / GROK_HOME path live elsewhere (profile rows, 打开配置目录) so the
+                // header stays a compact identity summary.
                 Text(identity?.detailLabel ?? active.name)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-                if let detail = usage?.detailRemainingLabel {
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(usageColor(usage?.severity))
-                        .lineLimit(1)
-                }
-                Text("GROK_HOME → \(shortHome(active))")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
             } else {
                 Text("尚未配置账号")
                     .font(.caption)
@@ -121,8 +111,8 @@ struct MenuBarView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    if let remaining = usage?.detailRemainingLabel {
-                        Text(remaining)
+                    if let secondary = usage?.rowSecondaryLabel {
+                        Text(secondary)
                             .font(.caption2)
                             .foregroundStyle(usageColor(usage?.severity))
                             .lineLimit(1)
@@ -529,15 +519,6 @@ struct MenuBarView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func shortHome(_ profile: Profile) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let path = profile.homeURL.path
-        if path.hasPrefix(home) {
-            return "~" + path.dropFirst(home.count)
-        }
-        return path
     }
 
     private func usageColor(_ severity: UsageSeverity?) -> Color {

@@ -46,8 +46,9 @@ struct ProfileUsage: Equatable, Sendable {
         }
     }
 
-    /// Slightly longer label with "剩余" prefix for list rows.
-    var detailRemainingLabel: String? {
+    /// Profile-row subtitle under the identity: reset time or status only (no percent —
+    /// percent lives on the row trailing label to avoid duplication).
+    var rowSecondaryLabel: String? {
         switch status {
         case .loading:
             return "查询中…"
@@ -62,11 +63,7 @@ struct ProfileUsage: Equatable, Sendable {
         case .idle:
             return nil
         case .ready:
-            guard let remainingPercent else { return nil }
-            if let reset = resetShortLabel {
-                return "剩余 \(Self.formatPercent(remainingPercent)) · \(reset)"
-            }
-            return "剩余 \(Self.formatPercent(remainingPercent))"
+            return resetShortLabel
         }
     }
 
