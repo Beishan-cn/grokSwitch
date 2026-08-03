@@ -4,12 +4,14 @@ macOS 菜单栏工具：用官方 `GROK_HOME` 隔离多 Grok 账号，一键切�
 
 ## 功能（MVP）
 
-- 菜单栏显示当前账号短名（如 `G·antony.beishan`）
+- 菜单栏显示当前账号短名 + **剩余用量**（如 `G·antony.beishan 99%`）
+- 账号列表旁显示各 profile 的剩余额度，切换账号时一目了然
 - 点击切换账号（更新 active `GROK_HOME`）
 - 新开终端自动生效（写入 `~/.zshrc` hook + `~/.grokswitch/active.env`）
 - 用当前账号打开终端并启动 `grok`（可在设置中选择默认终端：Terminal / iTerm2 / Ghostty / Otty / Warp 等）
 - 添加新账号 profile（打开终端后 `grok login`）
 - 首次启动从现有 `~/.grok` 导入默认账号
+- 用量：用各账号 `auth.json` 的 Bearer 调用 grok.com 账单接口（与 CodexBar 同源），约每 10 分钟自动刷新
 
 ## 原理
 
@@ -86,7 +88,8 @@ source ~/.grokswitch/active.env
 - **不要**把 `~/.grok` 做成指向 profile 的软链接：Grok sandbox 会拒绝 symlink 形式的 `$GROK_HOME`。
 - 首次用 Terminal / iTerm2 打开 Grok 时，macOS 可能询问「自动化 / 控制该终端」权限，请允许。
 - 默认终端可在 **系统设置 → GrokSwitch**（或菜单栏应用的 Settings）中切换。
-- 本工具只读 `auth.json` 中的 email / 名字等展示字段，不会上传任何凭证。
+- 本工具读取 `auth.json` 中的 email / 名字用于展示，并用其中的 access token 向 grok.com 查询用量；凭证不会上传到第三方。
+- 团队账号可能无法查询个人用量（接口限制）；登录过期后需在对应 profile 下重新 `grok login`。
 
 ## 许可
 

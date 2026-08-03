@@ -50,14 +50,28 @@ struct MenuBarView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("GrokSwitch")
-                .font(.headline)
+            HStack(alignment: .firstTextBaseline) {
+                Text("GrokSwitch")
+                    .font(.headline)
+                Spacer(minLength: 8)
+                if store.isRefreshingUsage {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
             if let active = store.activeProfile {
                 let identity = store.identities[active.id]
+                let usage = store.usages[active.id]
                 Text(identity?.detailLabel ?? active.name)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                if let detail = usage?.detailRemainingLabel {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(usageColor(usage?.severity))
+                        .lineLimit(1)
+                }
                 Text("GROK_HOME → \(shortHome(active))")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -92,6 +106,7 @@ struct MenuBarView: View {
     private func profileRow(_ profile: Profile) -> some View {
         let isActive = store.activeProfile?.id == profile.id
         let identity = store.identities[profile.id]
+        let usage = store.usages[profile.id]
         return Button {
             _ = store.switchTo(profileID: profile.id)
         } label: {
@@ -106,9 +121,19 @@ struct MenuBarView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                    if let remaining = usage?.detailRemainingLabel {
+                        Text(remaining)
+                            .font(.caption2)
+                            .foregroundStyle(usageColor(usage?.severity))
+                            .lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 8)
-                if identity?.isLoggedIn == true {
+                if let label = usage?.remainingLabel, usage?.status == .ready {
+                    Text(label)
+                        .font(.body.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(usageColor(usage?.severity))
+                } else if identity?.isLoggedIn == true, identity?.isExpired != true {
                     Circle()
                         .fill(Color.green.opacity(0.85))
                         .frame(width: 7, height: 7)
@@ -210,12 +235,17 @@ struct MenuBarView: View {
 
             Button {
                 store.reload()
-                store.statusMessage = "已刷新账号状态"
+                store.refreshUsage(force: true)
+                store.statusMessage = "已刷新账号与用量"
             } label: {
-                labelRow(systemImage: "arrow.clockwise", title: "刷新")
+                labelRow(
+                    systemImage: "arrow.clockwise",
+                    title: store.isRefreshingUsage ? "刷新中…" : "刷新账号与用量"
+                )
             }
             .buttonStyle(MenuRowButtonStyle())
             .padding(.horizontal, 4)
+            .disabled(store.isRefreshingUsage)
         }
     }
 
@@ -508,6 +538,19 @@ struct MenuBarView: View {
             return "~" + path.dropFirst(home.count)
         }
         return path
+    }
+
+    private func usageColor(_ severity: UsageSeverity?) -> Color {
+        switch severity {
+        case .ok:
+            return Color.green
+        case .warning:
+            return Color.orange
+        case .critical:
+            return Color.red
+        case .unknown, .none:
+            return Color.secondary
+        }
     }
 }
 

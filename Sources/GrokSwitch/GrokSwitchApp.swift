@@ -9,7 +9,13 @@ struct GrokSwitchApp: App {
             MenuBarView()
                 .environmentObject(store)
         } label: {
-            Label(store.menuBarTitle, systemImage: "arrow.left.arrow.right.circle.fill")
+            // Custom Grok brand mark + remaining ring (not the old swap SF Symbol).
+            HStack(spacing: 4) {
+                MenuBarIcon.image(usage: store.activeUsage)
+                    .renderingMode(.template)
+                    .frame(width: 18, height: 18)
+                Text(store.menuBarTitle)
+            }
         }
         .menuBarExtraStyle(.window)
 
@@ -33,12 +39,21 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("菜单栏") {
-                Toggle("在菜单栏显示账号短名", isOn: Binding(
+                Toggle("在菜单栏显示剩余用量", isOn: Binding(
+                    get: { store.config.showUsageInMenuBar },
+                    set: { newValue in
+                        store.setShowUsageInMenuBar(newValue)
+                    }
+                ))
+                Toggle("无用量数据时显示账号短名", isOn: Binding(
                     get: { store.config.showEmailInMenuBar },
                     set: { newValue in
                         store.setShowEmailInMenuBar(newValue)
                     }
                 ))
+                Text("菜单栏默认只显示 Grok 图标与剩余百分比，账号名在下拉列表中查看。用量按每个账号的 auth.json 独立查询。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section {
                 Picker("默认终端", selection: Binding(
@@ -113,7 +128,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440, height: 420)
+        .frame(width: 440, height: 480)
         .padding()
     }
 

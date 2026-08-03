@@ -9,10 +9,13 @@ MACOS_DIR="$APP_DIR/Contents/MacOS"
 RES_DIR="$APP_DIR/Contents/Resources"
 SOURCES=(
   "$ROOT/Sources/GrokSwitch/Models.swift"
+  "$ROOT/Sources/GrokSwitch/UsageModels.swift"
   "$ROOT/Sources/GrokSwitch/Paths.swift"
   "$ROOT/Sources/GrokSwitch/AuthReader.swift"
+  "$ROOT/Sources/GrokSwitch/UsageFetcher.swift"
   "$ROOT/Sources/GrokSwitch/ShellHook.swift"
   "$ROOT/Sources/GrokSwitch/TerminalLauncher.swift"
+  "$ROOT/Sources/GrokSwitch/MenuBarIcon.swift"
   "$ROOT/Sources/GrokSwitch/ProfileStore.swift"
   "$ROOT/Sources/GrokSwitch/MenuBarView.swift"
   "$ROOT/Sources/GrokSwitch/GrokSwitchApp.swift"
@@ -31,6 +34,13 @@ swiftc \
   "${SOURCES[@]}"
 
 cp "$ROOT/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
+# Bundle menu-bar brand assets (SVG preferred; PNG fallback).
+if [[ -f "$ROOT/Resources/MenuBarGrok.svg" ]]; then
+  cp "$ROOT/Resources/MenuBarGrok.svg" "$RES_DIR/MenuBarGrok.svg"
+fi
+if [[ -f "$ROOT/Resources/MenuBarGrok.png" ]]; then
+  cp "$ROOT/Resources/MenuBarGrok.png" "$RES_DIR/MenuBarGrok.png"
+fi
 
 # PkgInfo is optional but conventional
 echo -n "APPL????" > "$APP_DIR/Contents/PkgInfo"

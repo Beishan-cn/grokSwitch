@@ -20,6 +20,8 @@ struct AppConfig: Codable, Equatable {
     var activeProfileID: String?
     var profiles: [Profile]
     var showEmailInMenuBar: Bool
+    /// Show remaining credit % next to the active account in the menu bar title.
+    var showUsageInMenuBar: Bool
     /// Preferred terminal app id (`TerminalApp.rawValue`). Defaults to Terminal.app.
     var preferredTerminal: String
     /// Absolute path of the preferred project directory to open Grok in (`--cwd`).
@@ -33,7 +35,8 @@ struct AppConfig: Codable, Equatable {
             version: currentVersion,
             activeProfileID: nil,
             profiles: [],
-            showEmailInMenuBar: true,
+            showEmailInMenuBar: false,
+            showUsageInMenuBar: true,
             preferredTerminal: TerminalApp.terminal.rawValue,
             preferredProjectPath: nil
         )
@@ -52,7 +55,8 @@ struct AppConfig: Codable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, activeProfileID, profiles, showEmailInMenuBar, preferredTerminal, preferredProjectPath
+        case version, activeProfileID, profiles, showEmailInMenuBar, showUsageInMenuBar
+        case preferredTerminal, preferredProjectPath
     }
 
     init(
@@ -60,6 +64,7 @@ struct AppConfig: Codable, Equatable {
         activeProfileID: String?,
         profiles: [Profile],
         showEmailInMenuBar: Bool,
+        showUsageInMenuBar: Bool = true,
         preferredTerminal: String = TerminalApp.terminal.rawValue,
         preferredProjectPath: String? = nil
     ) {
@@ -67,6 +72,7 @@ struct AppConfig: Codable, Equatable {
         self.activeProfileID = activeProfileID
         self.profiles = profiles
         self.showEmailInMenuBar = showEmailInMenuBar
+        self.showUsageInMenuBar = showUsageInMenuBar
         self.preferredTerminal = preferredTerminal
         self.preferredProjectPath = preferredProjectPath
     }
@@ -77,6 +83,7 @@ struct AppConfig: Codable, Equatable {
         activeProfileID = try c.decodeIfPresent(String.self, forKey: .activeProfileID)
         profiles = try c.decode([Profile].self, forKey: .profiles)
         showEmailInMenuBar = try c.decodeIfPresent(Bool.self, forKey: .showEmailInMenuBar) ?? true
+        showUsageInMenuBar = try c.decodeIfPresent(Bool.self, forKey: .showUsageInMenuBar) ?? true
         preferredTerminal = try c.decodeIfPresent(String.self, forKey: .preferredTerminal)
             ?? TerminalApp.terminal.rawValue
         preferredProjectPath = try c.decodeIfPresent(String.self, forKey: .preferredProjectPath)
@@ -123,36 +130,5 @@ enum ProjectScanner {
         return folders.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
-    }
-}
-
-struct AccountIdentity: Equatable {
-    var email: String?
-    var displayName: String?
-    var userID: String?
-    var isLoggedIn: Bool
-
-    var shortLabel: String {
-        if let email, !email.isEmpty {
-            let local = email.split(separator: "@").first.map(String.init) ?? email
-            return local
-        }
-        if let displayName, !displayName.isEmpty {
-            return displayName
-        }
-        return "未登录"
-    }
-
-    var detailLabel: String {
-        if let email, !email.isEmpty {
-            if let displayName, !displayName.isEmpty {
-                return "\(displayName) · \(email)"
-            }
-            return email
-        }
-        if let displayName, !displayName.isEmpty {
-            return displayName
-        }
-        return "未登录（运行 grok login）"
     }
 }

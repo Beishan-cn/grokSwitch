@@ -6,8 +6,10 @@ import Foundation
 final class ProfileStore: ObservableObject {
     @Published private(set) var config: AppConfig
     @Published private(set) var identities: [String: AccountIdentity] = [:]
+    @Published private(set) var usages: [String: ProfileUsage] = [:]
     @Published var lastError: String?
     @Published var statusMessage: String?
+    @Published private(set) var isRefreshingUsage = false
 
     private let fm = FileManager.default
     private let encoder: JSONEncoder = {
@@ -22,10 +24,24 @@ final class ProfileStore: ObservableObject {
         return d
     }()
 
+    /// Background refresh interval for credit usage.
+    private static let usageRefreshInterval: TimeInterval = 10 * 60
+    /// Treat a successful fetch as fresh for this long (skip re-fetch unless forced).
+    private static let usageFreshness: TimeInterval = 5 * 60
+
+    private var usageRefreshTask: Task<Void, Never>?
+    private var usageTimer: Timer?
+
     init() {
         self.config = .empty
         bootstrapIfNeeded()
         reload()
+        startUsageTimer()
+    }
+
+    deinit {
+        usageTimer?.invalidate()
+        usageRefreshTask?.cancel()
     }
 
     var activeProfile: Profile? {
@@ -33,14 +49,29 @@ final class ProfileStore: ObservableObject {
         return config.profiles.first(where: { $0.id == id }) ?? config.profiles.first
     }
 
+    /// Usage snapshot for the currently active profile (menu bar icon/title).
+    var activeUsage: ProfileUsage? {
+        guard let id = activeProfile?.id else { return nil }
+        return usages[id]
+    }
+
     var menuBarTitle: String {
-        guard let profile = activeProfile else { return "Grok" }
-        if config.showEmailInMenuBar {
-            let identity = identities[profile.id]
-            let short = identity?.shortLabel ?? profile.name
-            return "G·\(short)"
+        // Menu bar: brand icon + remaining only. Account name stays inside the dropdown.
+        guard let profile = activeProfile else { return "" }
+
+        if config.showUsageInMenuBar,
+           let usage = usages[profile.id],
+           let label = usage.remainingLabel,
+           usage.status == .ready || usage.status == .loading || usage.status == .expired
+        {
+            return label
         }
-        return "G·\(profile.name)"
+
+        // No usage yet / disabled: keep the bar compact (icon-only when empty).
+        if config.showEmailInMenuBar {
+            return identities[profile.id]?.shortLabel ?? profile.name
+        }
+        return ""
     }
 
     func reload() {
@@ -56,6 +87,7 @@ final class ProfileStore: ObservableObject {
             try? writeActiveEnv(for: active)
             _ = ShellHook.ensureInstalled()
         }
+        refreshUsage(force: false)
     }
 
     func refreshIdentities() {
@@ -64,6 +96,15 @@ final class ProfileStore: ObservableObject {
             map[profile.id] = AuthReader.identity(at: profile.authURL)
         }
         identities = map
+    }
+
+    /// Refresh Grok credit usage for every profile (parallel).
+    /// - Parameter force: ignore freshness cache and re-fetch everything.
+    func refreshUsage(force: Bool = true) {
+        usageRefreshTask?.cancel()
+        usageRefreshTask = Task { [weak self] in
+            await self?.performUsageRefresh(force: force)
+        }
     }
 
     @discardableResult
@@ -78,6 +119,8 @@ final class ProfileStore: ObservableObject {
             try writeActiveEnv(for: profile)
             _ = ShellHook.ensureInstalled()
             refreshIdentities()
+            // Ensure this profile's usage is loaded promptly when switching.
+            refreshUsage(force: false)
             statusMessage = "已切换到 \(profile.name)。新开终端生效。"
             lastError = nil
             return true
@@ -120,6 +163,7 @@ final class ProfileStore: ObservableObject {
             }
             try saveConfig()
             refreshIdentities()
+            usages[profile.id] = .notLoggedIn()
             statusMessage = "已创建「\(trimmed)」。打开终端后运行 grok login。"
             lastError = nil
             return profile
@@ -210,6 +254,102 @@ final class ProfileStore: ObservableObject {
         }
     }
 
+    func setShowUsageInMenuBar(_ value: Bool) {
+        config.showUsageInMenuBar = value
+        do {
+            try saveConfig()
+            objectWillChange.send()
+        } catch {
+            lastError = "保存设置失败：\(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Usage refresh
+
+    private func startUsageTimer() {
+        usageTimer?.invalidate()
+        let timer = Timer(timeInterval: Self.usageRefreshInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshUsage(force: true)
+            }
+        }
+        // Allow UI to stay responsive while timer fires.
+        RunLoop.main.add(timer, forMode: .common)
+        usageTimer = timer
+    }
+
+    private func performUsageRefresh(force: Bool) async {
+        let profiles = config.profiles
+        guard !profiles.isEmpty else { return }
+
+        isRefreshingUsage = true
+        defer { isRefreshingUsage = false }
+
+        // Mark profiles that will be fetched as loading (keep stale ready values visible).
+        for profile in profiles {
+            let current = usages[profile.id]
+            let identity = identities[profile.id] ?? AuthReader.identity(at: profile.authURL)
+            if !identity.isLoggedIn {
+                usages[profile.id] = .notLoggedIn()
+                continue
+            }
+            if identity.isExpired {
+                usages[profile.id] = .expired()
+                continue
+            }
+            if !force,
+               let current,
+               current.status == .ready,
+               let fetchedAt = current.fetchedAt,
+               Date().timeIntervalSince(fetchedAt) < Self.usageFreshness
+            {
+                continue
+            }
+            // Keep last ready value while loading so the UI doesn't flash "…".
+            if current?.status != .ready {
+                usages[profile.id] = .loading()
+            }
+        }
+
+        await withTaskGroup(of: (String, ProfileUsage).self) { group in
+            for profile in profiles {
+                let identity = identities[profile.id] ?? AuthReader.identity(at: profile.authURL)
+                guard identity.isLoggedIn, !identity.isExpired else { continue }
+
+                if !force,
+                   let current = usages[profile.id],
+                   current.status == .ready,
+                   let fetchedAt = current.fetchedAt,
+                   Date().timeIntervalSince(fetchedAt) < Self.usageFreshness
+                {
+                    continue
+                }
+
+                let authURL = profile.authURL
+                let profileID = profile.id
+                group.addTask {
+                    let result = await UsageFetcher.fetch(authURL: authURL)
+                    let usage: ProfileUsage
+                    switch result {
+                    case let .success(raw):
+                        usage = .ready(usedPercent: raw.usedPercent, resetsAt: raw.resetsAt)
+                    case let .failure(error):
+                        usage = ProfileUsage.fromFetchError(error)
+                    }
+                    return (profileID, usage)
+                }
+            }
+
+            for await (profileID, usage) in group {
+                if Task.isCancelled { break }
+                usages[profileID] = usage
+            }
+        }
+
+        // Force menu bar title recompute.
+        objectWillChange.send()
+    }
+
     // MARK: - Private
 
     private func ensureDirectories() {
@@ -275,7 +415,8 @@ final class ProfileStore: ObservableObject {
                 version: AppConfig.currentVersion,
                 activeProfileID: profile.id,
                 profiles: [profile],
-                showEmailInMenuBar: true,
+                showEmailInMenuBar: false,
+                showUsageInMenuBar: true,
                 preferredTerminal: TerminalApp.terminal.rawValue
             )
             try? saveConfig()
@@ -320,7 +461,8 @@ final class ProfileStore: ObservableObject {
                 version: AppConfig.currentVersion,
                 activeProfileID: profile.id,
                 profiles: [profile],
-                showEmailInMenuBar: true,
+                showEmailInMenuBar: false,
+                showUsageInMenuBar: true,
                 preferredTerminal: TerminalApp.terminal.rawValue
             )
             try saveConfig()
