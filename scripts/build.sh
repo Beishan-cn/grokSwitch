@@ -7,21 +7,17 @@ APP_NAME="GrokSwitch"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 RES_DIR="$APP_DIR/Contents/Resources"
-SOURCES=(
-  "$ROOT/Sources/GrokSwitch/Models.swift"
-  "$ROOT/Sources/GrokSwitch/UsageModels.swift"
-  "$ROOT/Sources/GrokSwitch/Paths.swift"
-  "$ROOT/Sources/GrokSwitch/AuthReader.swift"
-  "$ROOT/Sources/GrokSwitch/UsageFetcher.swift"
-  "$ROOT/Sources/GrokSwitch/ShellHook.swift"
-  "$ROOT/Sources/GrokSwitch/TerminalLauncher.swift"
-  "$ROOT/Sources/GrokSwitch/MenuBarIcon.swift"
-  "$ROOT/Sources/GrokSwitch/ProfileStore.swift"
-  "$ROOT/Sources/GrokSwitch/MenuBarView.swift"
-  "$ROOT/Sources/GrokSwitch/GrokSwitchApp.swift"
-)
 
-echo "==> Compiling $APP_NAME"
+# Prefer glob so new Sources/GrokSwitch/*.swift files are not missed.
+# Target: Apple Silicon (arm64) macOS 14+. Intel Macs are not supported by this script.
+shopt -s nullglob
+SOURCES=( "$ROOT/Sources/GrokSwitch/"*.swift )
+if [[ ${#SOURCES[@]} -eq 0 ]]; then
+  echo "error: no Swift sources under Sources/GrokSwitch/" >&2
+  exit 1
+fi
+
+echo "==> Compiling $APP_NAME (${#SOURCES[@]} sources, arm64-apple-macos14.0)"
 mkdir -p "$MACOS_DIR" "$RES_DIR"
 
 swiftc \
@@ -44,6 +40,11 @@ fi
 
 # PkgInfo is optional but conventional
 echo -n "APPL????" > "$APP_DIR/Contents/PkgInfo"
+
+# Ad-hoc sign for local Gatekeeper friendliness (dev).
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --deep -s - "$APP_DIR" 2>/dev/null || true
+fi
 
 echo "==> Built: $APP_DIR"
 echo "    Run:   open \"$APP_DIR\""
