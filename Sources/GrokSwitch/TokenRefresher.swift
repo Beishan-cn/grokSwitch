@@ -6,7 +6,7 @@ import Foundation
 enum AuthFileLock {
     /// Default wait budget when another process holds the lock (CLI mid-refresh).
     static let defaultTimeout: TimeInterval = 2.5
-    private static let retryInterval: useconds_t = 50_000 // 50ms
+    private static let retryIntervalNanos: UInt64 = 50_000_000 // 50ms
 
     enum LockError: Error {
         case timeout
@@ -17,8 +17,8 @@ enum AuthFileLock {
     static func withLock<T>(
         authURL: URL,
         timeout: TimeInterval = defaultTimeout,
-        body: () throws -> T
-    ) throws -> T {
+        body: () async throws -> T
+    ) async throws -> T {
         let lockURL = lockURL(for: authURL)
         let path = lockURL.path
         let fd = open(path, O_RDWR | O_CREAT, 0o600)
@@ -41,7 +41,7 @@ enum AuthFileLock {
             if Date() >= deadline {
                 throw LockError.timeout
             }
-            usleep(retryInterval)
+            try await Task.sleep(nanoseconds: retryIntervalNanos)
         }
 
         // Advertise holder in CLI-compatible form (best-effort).
@@ -56,7 +56,7 @@ enum AuthFileLock {
             _ = fsync(fd)
         }
 
-        return try body()
+        return try await body()
     }
 
     static func lockURL(for authURL: URL) -> URL {
@@ -112,10 +112,15 @@ enum TokenRefresher {
             var size: UInt64
         }
 
+        private struct InflightEntry {
+            var id: UUID
+            var task: Task<TokenRefresher.Outcome, Never>
+        }
+
         /// path → file identity at the time of permanent failure
         private var permanent: [String: FileIdentity] = [:]
         /// In-flight refresh per path so concurrent usage tasks share one attempt.
-        private var inflight: [String: Task<TokenRefresher.Outcome, Never>] = [:]
+        private var inflight: [String: InflightEntry] = [:]
 
         func ensureFresh(authURL: URL) async -> TokenRefresher.Outcome {
             let path = authURL.path
@@ -129,20 +134,36 @@ enum TokenRefresher {
             }
 
             if let existing = inflight[path] {
-                return await existing.value
+                return await existing.task.value
             }
 
+            // Detached work survives waiter cancellation (RT refresh must not abort mid-flight).
+            // A separate monitor always clears `inflight` when this generation finishes, so a
+            // cancelled waiter cannot leave a sticky stale Outcome.
+            let id = UUID()
             let task = Task.detached(priority: .userInitiated) {
-                TokenRefresher.performEnsureFresh(authURL: authURL)
+                await TokenRefresher.performEnsureFresh(authURL: authURL)
             }
-            inflight[path] = task
-            let outcome = await task.value
-            inflight[path] = nil
+            inflight[path] = InflightEntry(id: id, task: task)
+            Task {
+                let outcome = await task.value
+                self.finish(path: path, id: id, authURL: authURL, outcome: outcome)
+            }
+            return await task.value
+        }
 
+        /// Clear coalescing state for this generation only (ignore late finish after a newer attempt).
+        private func finish(
+            path: String,
+            id: UUID,
+            authURL: URL,
+            outcome: TokenRefresher.Outcome
+        ) {
+            guard inflight[path]?.id == id else { return }
+            inflight.removeValue(forKey: path)
             if case .permanentFailure = outcome {
                 permanent[path] = Self.fileIdentity(at: authURL)
             }
-            return outcome
         }
 
         private static func fileIdentity(at url: URL) -> FileIdentity {
@@ -155,11 +176,11 @@ enum TokenRefresher {
 
     // MARK: - Core (runs off MainActor)
 
-    private static func performEnsureFresh(authURL: URL) -> Outcome {
+    private static func performEnsureFresh(authURL: URL) async -> Outcome {
         let beforeKey = (try? AuthReader.credentials(at: authURL))?.accessToken
 
         do {
-            return try AuthFileLock.withLock(authURL: authURL) {
+            return try await AuthFileLock.withLock(authURL: authURL) {
                 let credentials: GrokCredentials
                 do {
                     credentials = try AuthReader.credentials(at: authURL)
@@ -190,7 +211,7 @@ enum TokenRefresher {
                 }
 
                 // Hold lock across HTTP + write to avoid refresh-token double-spend with CLI.
-                switch refreshOnce(tokenURL: tokenURL, clientID: clientID, refreshToken: refreshToken) {
+                switch await refreshOnce(tokenURL: tokenURL, clientID: clientID, refreshToken: refreshToken) {
                 case let .success(tokens):
                     do {
                         try writeTokens(
@@ -202,7 +223,10 @@ enum TokenRefresher {
                         )
                         return .refreshed
                     } catch {
-                        return .transientFailure("写入 auth.json 失败")
+                        // IdP may have rotated the refresh token; disk still has the old one.
+                        return .transientFailure(
+                            "刷新成功但写入失败，请重试；若持续失败请重新 grok login"
+                        )
                     }
                 case let .permanent(message):
                     return .permanentFailure(message)
@@ -219,6 +243,9 @@ enum TokenRefresher {
                     return .alreadyFresh
                 }
             }
+            return .skippedLocked
+        } catch is CancellationError {
+            // Lock wait cancelled: treat like lock skip (caller may retry later).
             return .skippedLocked
         } catch {
             return .transientFailure("获取 auth 锁失败")
@@ -256,7 +283,7 @@ enum TokenRefresher {
         tokenURL: URL,
         clientID: String,
         refreshToken: String
-    ) -> RefreshHTTPResult {
+    ) async -> RefreshHTTPResult {
         var request = URLRequest(url: tokenURL)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -269,34 +296,22 @@ enum TokenRefresher {
         let body = "grant_type=refresh_token&refresh_token=\(encodedRT)&client_id=\(encodedClient)"
         request.httpBody = body.data(using: .utf8)
 
-        let semaphore = DispatchSemaphore(value: 0)
-        var data: Data?
-        var response: URLResponse?
-        var error: Error?
-
-        let task = session.dataTask(with: request) { d, r, e in
-            data = d
-            response = r
-            error = e
-            semaphore.signal()
-        }
-        task.resume()
-        let waitResult = semaphore.wait(timeout: .now() + httpTimeout + 2)
-        if waitResult == .timedOut {
-            task.cancel()
-            return .transient("刷新登录态超时")
-        }
-
-        if let error {
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch is CancellationError {
+            return .transient("刷新登录态已取消")
+        } catch {
             return .transient(error.localizedDescription)
         }
+
         guard let http = response as? HTTPURLResponse else {
             return .transient("刷新登录态无有效响应")
         }
-        let bodyData = data ?? Data()
 
         if http.statusCode == 200 {
-            guard let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let access = json["access_token"] as? String,
                   !access.isEmpty
             else {
@@ -317,20 +332,17 @@ enum TokenRefresher {
             return .success(Tokens(accessToken: access, refreshToken: newRT, expiresAt: expiresAt))
         }
 
-        var errorCode = ""
-        if let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
+        let errorCode: String
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             errorCode = (json["error"] as? String) ?? ""
+        } else {
+            errorCode = ""
         }
         let lower = errorCode.lowercased()
-        if http.statusCode == 400 || http.statusCode == 401 {
-            if lower == "invalid_grant"
-                || lower.contains("invalid_grant")
-                || lower.contains("revoked")
-            {
-                return .permanent("登录已失效，请重新 grok login")
-            }
-        }
-        if (400 ... 499).contains(http.statusCode), lower == "invalid_grant" {
+        let isInvalidGrant = lower == "invalid_grant"
+            || lower.contains("invalid_grant")
+            || lower.contains("revoked")
+        if (400 ... 499).contains(http.statusCode), isInvalidGrant {
             return .permanent("登录已失效，请重新 grok login")
         }
         return .transient("刷新登录态失败 HTTP \(http.statusCode)")

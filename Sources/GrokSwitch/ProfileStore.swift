@@ -606,8 +606,19 @@ final class ProfileStore: ObservableObject {
                         return (profileID, .expired(), identityAfter)
                     }
                     if identityAfter.isExpired {
-                        // Still expired after ensureFresh (no RT, lock skip, transient, …).
-                        return (profileID, .expired(), identityAfter)
+                        // Distinguish soft failures from true session death.
+                        let usage: ProfileUsage
+                        switch refreshOutcome {
+                        case let .transientFailure(message):
+                            usage = .failed(message)
+                        case .skippedLocked:
+                            usage = .failed("登录态刷新被占用，请稍后重试")
+                        case .skippedNoRefreshToken, .skippedNotOIDC:
+                            usage = .expired()
+                        default:
+                            usage = .expired()
+                        }
+                        return (profileID, usage, identityAfter)
                     }
 
                     let result = await UsageFetcher.fetch(authURL: authURL)
