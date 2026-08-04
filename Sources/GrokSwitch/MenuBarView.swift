@@ -102,16 +102,11 @@ struct MenuBarView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
             } else if store.config.profiles.count > 8 {
-                // Scroll only when many accounts. A bare ScrollView in MenuBarExtra's VStack
-                // often collapses to 0 height → stacked Dividers look double and rows vanish.
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(store.config.profiles) { profile in
-                            profileRow(profile)
-                        }
+                menuBarScrollableList(count: store.config.profiles.count, maxHeight: 280) {
+                    ForEach(store.config.profiles) { profile in
+                        profileRow(profile)
                     }
                 }
-                .frame(maxHeight: 280)
             } else {
                 VStack(spacing: 0) {
                     ForEach(store.config.profiles) { profile in
@@ -599,14 +594,11 @@ struct MenuBarView: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 6)
             } else if scannedProjects.count > 10 {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(scannedProjects) { project in
-                            projectPickRow(project)
-                        }
+                menuBarScrollableList(count: scannedProjects.count, maxHeight: 240) {
+                    ForEach(scannedProjects) { project in
+                        projectPickRow(project)
                     }
                 }
-                .frame(maxHeight: 240)
             } else {
                 VStack(spacing: 0) {
                     ForEach(scannedProjects) { project in
@@ -693,6 +685,23 @@ struct MenuBarView: View {
         }
         .buttonStyle(MenuRowButtonStyle())
         .padding(.horizontal, 12)
+    }
+
+    /// MenuBarExtra lays out a parent `VStack` with unbounded height proposals that make a bare
+    /// `ScrollView` report ideal height 0 when only `maxHeight` is set — rows vanish. Pin a real
+    /// height from row count (capped) so the list stays visible and scrollable.
+    @ViewBuilder
+    private func menuBarScrollableList<Content: View>(
+        count: Int,
+        rowHeight: CGFloat = 32,
+        maxHeight: CGFloat,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let height = min(CGFloat(max(count, 1)) * rowHeight, maxHeight)
+        ScrollView {
+            VStack(spacing: 0, content: content)
+        }
+        .frame(height: height)
     }
 
     private var projectScanHint: String {
