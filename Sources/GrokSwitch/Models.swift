@@ -30,8 +30,12 @@ struct AppConfig: Codable, Equatable {
     /// Absolute path of the directory whose immediate subfolders are listed as project candidates.
     /// Empty / nil means auto-detect a common folder under `~` (Projects, Developer, Code, …).
     var projectsScanRoot: String?
+    /// Recently used project absolute paths, most recent first. Used to sort project pickers.
+    var recentProjectPaths: [String]
 
     static let currentVersion = 1
+    /// Soft cap so config stays small and the picker stays usable.
+    static let maxRecentProjects = 30
 
     static var empty: AppConfig {
         AppConfig(
@@ -42,7 +46,8 @@ struct AppConfig: Codable, Equatable {
             showUsageInMenuBar: true,
             preferredTerminal: TerminalApp.terminal.rawValue,
             preferredProjectPath: nil,
-            projectsScanRoot: nil
+            projectsScanRoot: nil,
+            recentProjectPaths: []
         )
     }
 
@@ -60,7 +65,7 @@ struct AppConfig: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case version, activeProfileID, profiles, showEmailInMenuBar, showUsageInMenuBar
-        case preferredTerminal, preferredProjectPath, projectsScanRoot
+        case preferredTerminal, preferredProjectPath, projectsScanRoot, recentProjectPaths
     }
 
     init(
@@ -71,7 +76,8 @@ struct AppConfig: Codable, Equatable {
         showUsageInMenuBar: Bool = true,
         preferredTerminal: String = TerminalApp.terminal.rawValue,
         preferredProjectPath: String? = nil,
-        projectsScanRoot: String? = nil
+        projectsScanRoot: String? = nil,
+        recentProjectPaths: [String] = []
     ) {
         self.version = version
         self.activeProfileID = activeProfileID
@@ -81,6 +87,7 @@ struct AppConfig: Codable, Equatable {
         self.preferredTerminal = preferredTerminal
         self.preferredProjectPath = preferredProjectPath
         self.projectsScanRoot = projectsScanRoot
+        self.recentProjectPaths = recentProjectPaths
     }
 
     init(from decoder: Decoder) throws {
@@ -95,6 +102,14 @@ struct AppConfig: Codable, Equatable {
             ?? TerminalApp.terminal.rawValue
         preferredProjectPath = try c.decodeIfPresent(String.self, forKey: .preferredProjectPath)
         projectsScanRoot = try c.decodeIfPresent(String.self, forKey: .projectsScanRoot)
+        recentProjectPaths = try c.decodeIfPresent([String].self, forKey: .recentProjectPaths) ?? []
+        // Migrate older configs: treat the saved default project as most-recently used.
+        if recentProjectPaths.isEmpty,
+           let preferred = preferredProjectPath,
+           !preferred.isEmpty
+        {
+            recentProjectPaths = [preferred]
+        }
     }
 }
 
@@ -171,7 +186,9 @@ enum ProjectScanner {
     static let maxListedProjects = 400
 
     /// List immediate subdirectories under the resolved scan root (non-hidden, folders only).
-    static func scan(configuredRoot: String? = nil) -> [ProjectFolder] {
+    /// - Parameter recentPaths: absolute paths most-recent-first; those still under the scan root
+    ///   appear first (in that order), then remaining folders A–Z by name.
+    static func scan(configuredRoot: String? = nil, recentPaths: [String] = []) -> [ProjectFolder] {
         guard let root = resolveRoot(configured: configuredRoot) else {
             return []
         }
@@ -194,9 +211,40 @@ enum ProjectScanner {
             folders.append(ProjectFolder(name: name, path: url.path))
             if folders.count >= maxListedProjects { break }
         }
-        return folders.sorted {
-            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        return sort(folders, recentPaths: recentPaths)
+    }
+
+    /// Recent-first, then case-insensitive name A–Z.
+    static func sort(_ folders: [ProjectFolder], recentPaths: [String]) -> [ProjectFolder] {
+        var recentIndex: [String: Int] = [:]
+        for (index, path) in recentPaths.enumerated() {
+            let key = normalizePath(path)
+            // Keep first occurrence (most recent); skip later duplicates.
+            if recentIndex[key] == nil {
+                recentIndex[key] = index
+            }
         }
+        return folders.sorted { lhs, rhs in
+            let li = recentIndex[normalizePath(lhs.path)]
+            let ri = recentIndex[normalizePath(rhs.path)]
+            switch (li, ri) {
+            case let (l?, r?):
+                return l < r
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+        }
+    }
+
+    /// Expand `~` and drop trailing slashes so stored vs scanned paths match.
+    static func normalizePath(_ path: String) -> String {
+        let expanded = (path as NSString).expandingTildeInPath
+        if expanded == "/" { return expanded }
+        return expanded.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     // MARK: - Helpers

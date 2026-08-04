@@ -404,6 +404,8 @@ final class ProfileStore: ObservableObject {
                 terminal: terminal,
                 projectPath: project
             )
+            // Count successful launches toward "recent projects" ordering.
+            recordRecentProjectPath(project)
             applyLaunchOutcome(outcome, profile: target, terminal: terminal, projectPath: project)
         } catch {
             // Keep prior errors (e.g. env write from add/switch) and append launch failure.
@@ -444,6 +446,9 @@ final class ProfileStore: ObservableObject {
         }
         var draft = config
         draft.preferredProjectPath = normalized
+        if let normalized {
+            Self.bumpRecentProjectPath(normalized, in: &draft)
+        }
         do {
             try commitConfig(draft)
             config = draft
@@ -457,6 +462,38 @@ final class ProfileStore: ObservableObject {
         } catch {
             lastError = "保存设置失败：\(error.localizedDescription)"
         }
+    }
+
+    /// Move `path` to the front of `recentProjectPaths` (most recent first).
+    func recordRecentProjectPath(_ path: String?) {
+        guard let path, !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let normalized = (path as NSString).expandingTildeInPath
+        var draft = config
+        let before = draft.recentProjectPaths
+        Self.bumpRecentProjectPath(normalized, in: &draft)
+        guard draft.recentProjectPaths != before else { return }
+        do {
+            try commitConfig(draft)
+            config = draft
+        } catch {
+            // Non-fatal: launch / preference already succeeded; ordering is best-effort.
+            lastError = mergeError(
+                existing: lastError,
+                additional: "更新最近项目失败：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private static func bumpRecentProjectPath(_ path: String, in draft: inout AppConfig) {
+        let key = ProjectScanner.normalizePath(path)
+        var list = draft.recentProjectPaths.filter {
+            ProjectScanner.normalizePath($0) != key
+        }
+        list.insert(path, at: 0)
+        if list.count > AppConfig.maxRecentProjects {
+            list = Array(list.prefix(AppConfig.maxRecentProjects))
+        }
+        draft.recentProjectPaths = list
     }
 
     /// Set the parent directory whose subfolders are listed as project candidates.

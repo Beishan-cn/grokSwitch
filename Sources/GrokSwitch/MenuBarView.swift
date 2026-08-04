@@ -718,7 +718,10 @@ struct MenuBarView: View {
     }
 
     private func refreshScannedProjects() {
-        scannedProjects = ProjectScanner.scan(configuredRoot: store.config.projectsScanRoot)
+        scannedProjects = ProjectScanner.scan(
+            configuredRoot: store.config.projectsScanRoot,
+            recentPaths: store.config.recentProjectPaths
+        )
     }
 
     private func browseAnyProject() {
