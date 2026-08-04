@@ -123,7 +123,7 @@ struct ProfileUsage: Equatable, Sendable {
     }
 
     static func expired() -> ProfileUsage {
-        ProfileUsage(status: .expired, errorMessage: "登录已过期")
+        ProfileUsage(status: .expired, errorMessage: "登录已过期，请重新 grok login")
     }
 
     static func teamUnsupported() -> ProfileUsage {

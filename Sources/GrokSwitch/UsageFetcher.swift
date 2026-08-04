@@ -104,6 +104,7 @@ enum UsageFetcher {
         }
 
         if credentials.isExpired {
+            // Caller (ProfileStore) should have already tried ensureFresh; keep as hard fail.
             return .failure(.expiredCredentials)
         }
 
@@ -111,9 +112,47 @@ enum UsageFetcher {
             let raw = try await fetch(accessToken: credentials.accessToken, principalType: credentials.principalType)
             return .success(raw)
         } catch let error as FetchError {
+            // Single 401/auth retry: one ensureFresh + one re-fetch (no loops).
+            if Self.isAuthFetchError(error) {
+                let outcome = await TokenRefresher.ensureFresh(authURL: authURL)
+                switch outcome {
+                case .refreshed, .alreadyFresh, .adoptedSibling:
+                    do {
+                        let fresh = try AuthReader.credentials(at: authURL)
+                        if !fresh.isExpired {
+                            let raw = try await fetch(
+                                accessToken: fresh.accessToken,
+                                principalType: fresh.principalType
+                            )
+                            return .success(raw)
+                        }
+                    } catch let retryError as FetchError {
+                        return .failure(retryError)
+                    } catch {
+                        return .failure(.network(error.localizedDescription))
+                    }
+                case .permanentFailure:
+                    return .failure(.expiredCredentials)
+                default:
+                    break
+                }
+            }
             return .failure(error)
         } catch {
             return .failure(.network(error.localizedDescription))
+        }
+    }
+
+    private static func isAuthFetchError(_ error: FetchError) -> Bool {
+        switch error {
+        case .requestFailed(status: 401, _), .requestFailed(status: 403, _):
+            return true
+        case let .rpcFailed(status, message):
+            return status == 16 || FetchError.isAuthRPC(status: status, message: message)
+        case .expiredCredentials:
+            return true
+        default:
+            return false
         }
     }
 

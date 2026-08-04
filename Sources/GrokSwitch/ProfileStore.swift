@@ -559,7 +559,8 @@ final class ProfileStore: ObservableObject {
                 usages[profile.id] = .notLoggedIn()
                 continue
             }
-            if identity.isExpired {
+            // Expired with no silent-refresh path → show expired without network.
+            if identity.isExpired, !identity.canSilentRefresh {
                 usages[profile.id] = .expired()
                 continue
             }
@@ -576,12 +577,14 @@ final class ProfileStore: ObservableObject {
             }
         }
 
-        await withTaskGroup(of: (String, ProfileUsage).self) { group in
+        await withTaskGroup(of: (String, ProfileUsage, AccountIdentity?).self) { group in
             for profile in profiles {
                 let identity = identities[profile.id] ?? AuthReader.identity(at: profile.authURL)
-                // Skip fetch when auth file is missing/broken or session expired.
+                // Skip fetch when auth file is missing/broken.
                 if identity.authIssue != nil { continue }
-                guard identity.isLoggedIn, !identity.isExpired else { continue }
+                guard identity.isLoggedIn else { continue }
+                // Unrecoverable expiry: no refresh_token / OIDC fields.
+                if identity.isExpired, !identity.canSilentRefresh { continue }
 
                 if !force,
                    let current = usages[profile.id],
@@ -595,6 +598,18 @@ final class ProfileStore: ObservableObject {
                 let authURL = profile.authURL
                 let profileID = profile.id
                 group.addTask {
+                    // Low-risk OIDC refresh before billing call (at most one IdP request).
+                    let refreshOutcome = await TokenRefresher.ensureFresh(authURL: authURL)
+                    let identityAfter = AuthReader.identity(at: authURL)
+
+                    if case .permanentFailure = refreshOutcome {
+                        return (profileID, .expired(), identityAfter)
+                    }
+                    if identityAfter.isExpired {
+                        // Still expired after ensureFresh (no RT, lock skip, transient, …).
+                        return (profileID, .expired(), identityAfter)
+                    }
+
                     let result = await UsageFetcher.fetch(authURL: authURL)
                     let usage: ProfileUsage
                     switch result {
@@ -603,14 +618,25 @@ final class ProfileStore: ObservableObject {
                     case let .failure(error):
                         usage = ProfileUsage.fromFetchError(error)
                     }
-                    return (profileID, usage)
+                    let refreshedIdentity: AccountIdentity? = {
+                        switch refreshOutcome {
+                        case .refreshed, .adoptedSibling:
+                            return identityAfter
+                        default:
+                            return identityAfter.isExpired != identity.isExpired ? identityAfter : nil
+                        }
+                    }()
+                    return (profileID, usage, refreshedIdentity)
                 }
             }
 
-            for await (profileID, usage) in group {
+            for await (profileID, usage, identityAfter) in group {
                 guard generation == usageRefreshGeneration, !Task.isCancelled else { break }
                 guard config.profiles.contains(where: { $0.id == profileID }) else { continue }
                 usages[profileID] = usage
+                if let identityAfter {
+                    identities[profileID] = identityAfter
+                }
             }
         }
 
