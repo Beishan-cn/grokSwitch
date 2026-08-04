@@ -626,23 +626,6 @@ struct MenuBarView: View {
             .buttonStyle(MenuRowButtonStyle())
             .padding(.horizontal, 12)
 
-            // Free-form pick + scan-root change (not everyone uses ~/Projects).
-            HStack(spacing: 8) {
-                Button("浏览…") {
-                    browseAnyProject()
-                }
-                .buttonStyle(.bordered)
-
-                Button("扫描目录…") {
-                    changeScanRoot()
-                }
-                .buttonStyle(.bordered)
-
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 4)
-
             HStack(spacing: 8) {
                 Button("取消") {
                     isChoosingProject = false
@@ -712,9 +695,9 @@ struct MenuBarView: View {
 
     private var emptyProjectsMessage: String {
         if ProjectScanner.resolveRoot(configured: store.config.projectsScanRoot) == nil {
-            return "未找到常见项目目录，请点「扫描目录…」或「浏览…」"
+            return "未找到常见项目目录，请到设置里选择扫描目录或浏览项目"
         }
-        return "该目录下没有子文件夹，可「浏览…」任选路径"
+        return "该目录下没有子文件夹，可到设置里浏览任选路径"
     }
 
     private func refreshScannedProjects() {
@@ -722,34 +705,6 @@ struct MenuBarView: View {
             configuredRoot: store.config.projectsScanRoot,
             recentPaths: store.config.recentProjectPaths
         )
-    }
-
-    private func browseAnyProject() {
-        let start = ProjectScanner.resolveRoot(configured: store.config.projectsScanRoot)
-        guard let url = FolderPicker.pickDirectory(
-            message: "选择用作默认项目的文件夹",
-            prompt: "设为默认项目",
-            startingAt: start
-        ) else {
-            return
-        }
-        // Commit immediately: MenuBarExtra often dismisses when the panel steals focus.
-        pendingProjectPath = url.path
-        store.setPreferredProjectPath(url.path)
-        refreshScannedProjects()
-    }
-
-    private func changeScanRoot() {
-        let start = ProjectScanner.resolveRoot(configured: store.config.projectsScanRoot)
-        guard let url = FolderPicker.pickDirectory(
-            message: "选择要扫描的项目父目录",
-            prompt: "用作扫描目录",
-            startingAt: start
-        ) else {
-            return
-        }
-        store.setProjectsScanRoot(url.path)
-        refreshScannedProjects()
     }
 
     private func projectDisplayName(_ path: String?) -> String {
