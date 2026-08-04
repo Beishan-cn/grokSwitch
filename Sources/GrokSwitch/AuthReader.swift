@@ -2,6 +2,13 @@ import Foundation
 
 /// Credentials + identity extracted from a profile's `auth.json`.
 struct GrokCredentials: Equatable, Sendable {
+    /// Align with Grok CLI default `GROK_AUTH_EARLY_INVALIDATION_SECS`.
+    static let earlyRefreshLeeway: TimeInterval = 300
+    /// Hard leeway for treating access token as already unusable.
+    static let expiryHardLeeway: TimeInterval = 30
+    /// Fallback access-token lifetime when IdP omits `expires_in` (observed SuperGrok OIDC ≈ 6h).
+    static let defaultAccessTokenLifetime: TimeInterval = 6 * 3600
+
     var accessToken: String
     var refreshToken: String?
     var email: String?
@@ -12,11 +19,28 @@ struct GrokCredentials: Equatable, Sendable {
     var authMode: String?
     var expiresAt: Date?
     var scope: String
+    var oidcIssuer: String?
+    var oidcClientID: String?
 
     var isExpired: Bool {
         guard let expiresAt else { return false }
         // Small leeway so we don't fire a doomed request in the last few seconds.
-        return Date() >= expiresAt.addingTimeInterval(-30)
+        return Date() >= expiresAt.addingTimeInterval(-Self.expiryHardLeeway)
+    }
+
+    /// True when access token is inside the early-refresh window (or already expired).
+    /// No `expires_at` → false (unknown lifetime; do not proactive-refresh).
+    var needsRefresh: Bool {
+        guard let expiresAt else { return false }
+        return Date() >= expiresAt.addingTimeInterval(-Self.earlyRefreshLeeway)
+    }
+
+    /// Whether silent OIDC refresh is plausible (does not validate host whitelist).
+    var canSilentRefresh: Bool {
+        guard let refreshToken, !refreshToken.isEmpty else { return false }
+        guard let oidcIssuer, !oidcIssuer.isEmpty else { return false }
+        guard let oidcClientID, !oidcClientID.isEmpty else { return false }
+        return true
     }
 
     var isTeamPrincipal: Bool {
@@ -69,6 +93,8 @@ struct AccountIdentity: Equatable {
     var isLoggedIn: Bool
     var isExpired: Bool
     var isTeamPrincipal: Bool
+    /// Whether silent OIDC refresh may still recover an expired/near-expired session.
+    var canSilentRefresh: Bool
     /// Set when credentials could not be loaded. Distinguishes missing file vs broken auth.json.
     var authIssue: AccountAuthIssue?
 
@@ -79,6 +105,7 @@ struct AccountIdentity: Equatable {
         isLoggedIn: Bool = false,
         isExpired: Bool = false,
         isTeamPrincipal: Bool = false,
+        canSilentRefresh: Bool = false,
         authIssue: AccountAuthIssue? = nil
     ) {
         self.email = email
@@ -87,6 +114,7 @@ struct AccountIdentity: Equatable {
         self.isLoggedIn = isLoggedIn
         self.isExpired = isExpired
         self.isTeamPrincipal = isTeamPrincipal
+        self.canSilentRefresh = canSilentRefresh
         self.authIssue = authIssue
     }
 
@@ -97,6 +125,7 @@ struct AccountIdentity: Equatable {
         self.isLoggedIn = credentials.isLoggedIn
         self.isExpired = credentials.isExpired
         self.isTeamPrincipal = credentials.isTeamPrincipal
+        self.canSilentRefresh = credentials.canSilentRefresh
         self.authIssue = nil
     }
 
@@ -221,7 +250,9 @@ enum AuthReader {
             principalType: (entry["principal_type"] as? String)?.nilIfEmpty,
             authMode: (entry["auth_mode"] as? String)?.nilIfEmpty,
             expiresAt: parseDate(entry["expires_at"]),
-            scope: scope
+            scope: scope,
+            oidcIssuer: (entry["oidc_issuer"] as? String)?.nilIfEmpty,
+            oidcClientID: (entry["oidc_client_id"] as? String)?.nilIfEmpty
         )
     }
 
@@ -232,6 +263,7 @@ enum AuthReader {
             var rank: Int // 0 OIDC, 1 legacy, 2 other
             var expiresAt: Date?
             var isExpired: Bool
+            var canSilentRefresh: Bool
         }
 
         var candidates: [Candidate] = []
@@ -250,24 +282,33 @@ enum AuthReader {
             let expiresAt = parseDate(entry["expires_at"])
             let expired: Bool
             if let expiresAt {
-                expired = Date() >= expiresAt.addingTimeInterval(-30)
+                expired = Date() >= expiresAt.addingTimeInterval(-GrokCredentials.expiryHardLeeway)
             } else {
                 expired = false // unknown expiry ≠ expired
             }
+            let hasRT = (entry["refresh_token"] as? String)?.nilIfEmpty != nil
+            let hasIssuer = (entry["oidc_issuer"] as? String)?.nilIfEmpty != nil
+            let hasClient = (entry["oidc_client_id"] as? String)?.nilIfEmpty != nil
+            // Prefer OIDC-shaped entries for silent refresh when everything is expired.
+            let canSilent = hasRT && hasIssuer && hasClient
             candidates.append(Candidate(
                 scope: scope,
                 entry: entry,
                 rank: rank,
                 expiresAt: expiresAt,
-                isExpired: expired
+                isExpired: expired,
+                canSilentRefresh: canSilent
             ))
         }
         guard !candidates.isEmpty else { return nil }
 
-        // Prefer non-expired, then OIDC > legacy > other, then latest expiresAt.
+        // Prefer non-expired, then silent-refreshable, then OIDC > legacy > other, then latest expiresAt.
         let sorted = candidates.sorted { lhs, rhs in
             if lhs.isExpired != rhs.isExpired {
                 return !lhs.isExpired && rhs.isExpired
+            }
+            if lhs.isExpired, rhs.isExpired, lhs.canSilentRefresh != rhs.canSilentRefresh {
+                return lhs.canSilentRefresh && !rhs.canSilentRefresh
             }
             if lhs.rank != rhs.rank {
                 return lhs.rank < rhs.rank
@@ -287,7 +328,7 @@ enum AuthReader {
         return (best.scope, best.entry)
     }
 
-    private static func parseDate(_ raw: Any?) -> Date? {
+    static func parseDate(_ raw: Any?) -> Date? {
         guard let value = raw as? String, !value.isEmpty else { return nil }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -296,6 +337,12 @@ enum AuthReader {
         }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: value)
+    }
+
+    static func formatDate(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
     }
 }
 
