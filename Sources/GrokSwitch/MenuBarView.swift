@@ -567,26 +567,6 @@ struct MenuBarView: View {
                 .padding(.top, 2)
                 .padding(.bottom, 4)
 
-            // None option
-            Button {
-                pendingProjectPath = nil
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: pendingProjectPath == nil ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(pendingProjectPath == nil ? Color.accentColor : Color.secondary)
-                        .frame(width: 16)
-                    Text("未选择")
-                        .font(.body.weight(pendingProjectPath == nil ? .semibold : .regular))
-                    Spacer(minLength: 8)
-                }
-                .contentShape(Rectangle())
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(MenuRowButtonStyle())
-            .padding(.horizontal, 12)
-
             if scannedProjects.isEmpty {
                 Text(emptyProjectsMessage)
                     .font(.caption)
@@ -625,6 +605,26 @@ struct MenuBarView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 6)
             }
+
+            // Rarely used; keep after the project list so real folders stay on top.
+            Button {
+                pendingProjectPath = nil
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: pendingProjectPath == nil ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(pendingProjectPath == nil ? Color.accentColor : Color.secondary)
+                        .frame(width: 16)
+                    Text("未选择")
+                        .font(.body.weight(pendingProjectPath == nil ? .semibold : .regular))
+                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(MenuRowButtonStyle())
+            .padding(.horizontal, 12)
 
             // Free-form pick + scan-root change (not everyone uses ~/Projects).
             HStack(spacing: 8) {

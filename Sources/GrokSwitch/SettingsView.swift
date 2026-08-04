@@ -311,7 +311,6 @@ struct SettingsView: View {
                                 store.setPreferredProjectPath(newValue.isEmpty ? nil : newValue)
                             }
                         )) {
-                            Text("未选择").tag("")
                             ForEach(scannedProjects) { project in
                                 Text(project.name)
                                     .lineLimit(1)
@@ -326,6 +325,7 @@ struct SettingsView: View {
                                     .truncationMode(.middle)
                                     .tag(current)
                             }
+                            Text("未选择").tag("")
                         }
                         .labelsHidden()
                         .frame(minWidth: 160, idealWidth: 240, maxWidth: 360, alignment: .trailing)
