@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
+# Build GrokSwitch.app into a stable local path (unsigned / ad-hoc only).
+#
+# Day-to-day iteration: use scripts/dev-run.sh (installs to /Applications with a
+# stable codesign identity so Automation / TCC grants survive rebuilds).
+#
+# Optional env:
+#   BUILD_DIR   override output directory (default: <repo>/.build)
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$ROOT/.build"
+export LANG="${LANG:-C}"
+export LC_ALL="${LC_ALL:-C}"
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-$ROOT/.build}"
 APP_NAME="GrokSwitch"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
@@ -30,6 +40,7 @@ swiftc \
   "${SOURCES[@]}"
 
 cp "$ROOT/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
+
 # Bundle menu-bar brand assets (SVG preferred; PNG fallback).
 if [[ -f "$ROOT/Resources/MenuBarGrok.svg" ]]; then
   cp "$ROOT/Resources/MenuBarGrok.svg" "$RES_DIR/MenuBarGrok.svg"
@@ -41,12 +52,12 @@ fi
 # PkgInfo is optional but conventional
 echo -n "APPL????" > "$APP_DIR/Contents/PkgInfo"
 
-# Ad-hoc sign for local Gatekeeper friendliness (dev).
+# Ad-hoc sign so a bare `open .build/GrokSwitch.app` works locally.
+# dev-run.sh re-signs the /Applications install with a stable identity + entitlements.
 if command -v codesign >/dev/null 2>&1; then
   codesign --force --deep -s - "$APP_DIR" 2>/dev/null || true
 fi
 
 echo "==> Built: $APP_DIR"
-echo "    Run:   open \"$APP_DIR\""
-echo "    Install to /Applications:"
-echo "           cp -R \"$APP_DIR\" /Applications/"
+echo "    Dev loop:  ./scripts/dev-run.sh"
+echo "    Local open: open \"$APP_DIR\""
