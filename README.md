@@ -126,7 +126,8 @@ source ~/.grokswitch/active.env
 - profile 的 `homePath` 必须位于 `~/.grokswitch/profiles/<id>`；手改 config 指向其它路径会被拒绝。
 - 首次用 Terminal / iTerm2 打开 Grok 时，macOS 可能询问「自动化 / 控制该终端」权限，请允许。
 - 本工具读取 `auth.json` 中的 email / 名字用于展示，并用其中的 access token 向 grok.com 查询用量；凭证不会上传到第三方。
-- 团队账号可能无法查询个人用量（接口限制）；登录过期后需在对应 profile 下重新 `grok login`。
+- 查询用量前，若 access token 即将过期/已过期且存在 `refresh_token`，会向官方 OIDC 端点 `https://auth.x.ai/oauth2/token` 做**标准 refresh**（与 Grok CLI 同类），并写回该 profile 的 `auth.json`。不会调用其它非公开接口，也不会启动 `grok` 进程代为续期。
+- 团队账号可能无法查询个人用量（接口限制）；若 refresh 失败（例如 `invalid_grant`）或没有 refresh_token，需在对应 profile 下重新 `grok login`。
 
 ## 许可
 

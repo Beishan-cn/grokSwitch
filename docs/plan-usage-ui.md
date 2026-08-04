@@ -10,7 +10,7 @@
 5. **`showEmailInMenuBar` 语义对齐**：命名/默认值/文案与 store 侧计划一致，不在本 PR 做无关配置迁移大手术。
 
 ### Non-goals
-- 不实现 token refresh / OAuth 完整生命周期。
+- 不实现完整 OAuth 登录生命周期（浏览器 login 等）。Access token 静默续期见 `docs/plan-token-refresh.md`（已实现）。
 - 不逆向完整 `GetGrokCreditsConfig` protobuf schema 或生成正式 `.proto` 代码。
 - 不重做 MenuBarExtra 架构（仍用 `.window` + 内联 expander，不用 sheet）。
 - 不处理 store 计划中的 config 损坏 re-seed、switch/add 回滚等（见 store plan；本计划仅协调 `showEmailInMenuBar` 默认值）。
