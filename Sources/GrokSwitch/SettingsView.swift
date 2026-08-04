@@ -107,8 +107,7 @@ struct SettingsView: View {
     private var accountsSection: some View {
         SettingsSectionCard(
             title: "账号",
-            systemImage: "person.2",
-            footer: "删除会移除该账号的 GROK_HOME（含登录凭证），不可恢复。至少保留一个账号。"
+            systemImage: "person.2"
         ) {
             VStack(alignment: .leading, spacing: 0) {
                 if store.config.profiles.isEmpty, !isAddingAccount {
@@ -206,8 +205,7 @@ struct SettingsView: View {
     private var menuBarSection: some View {
         SettingsSectionCard(
             title: "菜单栏",
-            systemImage: "menubar.rectangle",
-            footer: "菜单栏默认只显示 Grok 图标与剩余百分比；开启上方开关后，在无用量数据时显示账号短名。账号名始终可在下拉列表中查看。用量按每个账号的 auth.json 独立查询。"
+            systemImage: "menubar.rectangle"
         ) {
             // Two related toggles side-by-side — fills the card without the sparse two-row list look.
             HStack(alignment: .center, spacing: 20) {
@@ -236,8 +234,7 @@ struct SettingsView: View {
     private var terminalSection: some View {
         SettingsSectionCard(
             title: "终端",
-            systemImage: "terminal",
-            footer: "「用当前账号打开 Grok」会使用此终端启动。支持 Terminal、iTerm2、Ghostty、Otty、Warp、Alacritty、Kitty、WezTerm 等。"
+            systemImage: "terminal"
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 16) {
@@ -278,8 +275,7 @@ struct SettingsView: View {
     private var projectsSection: some View {
         SettingsSectionCard(
             title: "项目",
-            systemImage: "folder",
-            footer: projectSectionFooter
+            systemImage: "folder"
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 // Scan root tools
@@ -605,11 +601,6 @@ struct SettingsView: View {
         return "\(path)（自动）"
     }
 
-    private var projectSectionFooter: String {
-        let root = ProjectScanner.displayRoot(configured: store.config.projectsScanRoot)
-        return "扫描 \(root) 下的子文件夹作为候选；也可「浏览项目」任选路径。「用当前账号打开 Grok」会以 grok --cwd 进入所选项目。未配置时自动识别 ~/Projects、~/Developer、~/Code 等常见目录。"
-    }
-
     private func refreshScannedProjects() {
         scannedProjects = ProjectScanner.scan(configuredRoot: store.config.projectsScanRoot)
     }
@@ -646,18 +637,15 @@ struct SettingsView: View {
 private struct SettingsSectionCard<Content: View>: View {
     let title: String
     let systemImage: String
-    let footer: String?
     @ViewBuilder let content: Content
 
     init(
         title: String,
         systemImage: String,
-        footer: String? = nil,
         @ViewBuilder content: () -> Content
     ) {
         self.title = title
         self.systemImage = systemImage
-        self.footer = footer
         self.content = content()
     }
 
@@ -677,14 +665,6 @@ private struct SettingsSectionCard<Content: View>: View {
             .overlay {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 1)
-            }
-
-            if let footer {
-                Text(footer)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 2)
             }
         }
     }
