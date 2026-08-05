@@ -22,6 +22,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/.build}"
 APP_NAME="GrokSwitch"
 PROCESS_NAME="GrokSwitch"
+INSTALLED_BUNDLE_IDENTIFIER="com.antony.grokswitch"
 BUILT_APP="$BUILD_DIR/$APP_NAME.app"
 INSTALLED_APP="/Applications/$APP_NAME.app"
 BUILT_BIN="$BUILT_APP/Contents/MacOS/$APP_NAME"
@@ -202,6 +203,12 @@ if [[ ! -x "$BUILT_BIN" ]]; then
   exit 1
 fi
 
+PREVIOUS_ICON_FILE=""
+if [[ -f "$INSTALLED_APP/Contents/Info.plist" ]]; then
+  PREVIOUS_ICON_FILE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
+    "$INSTALLED_APP/Contents/Info.plist" 2>/dev/null || true)"
+fi
+
 kill_existing
 
 echo "▶︎ Installing to ${INSTALLED_APP}…"
@@ -209,6 +216,14 @@ echo "▶︎ Installing to ${INSTALLED_APP}…"
 # TCC entries (System Settings still shows grants while the new binary is untrusted).
 mkdir -p "$(dirname "$INSTALLED_APP")"
 ditto "$BUILT_APP" "$INSTALLED_APP"
+
+# The staged .build app deliberately uses a development-only bundle ID to
+# avoid LaunchServices icon/cache collisions. Restore the production ID only
+# in the installed copy before applying its final signature.
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $INSTALLED_BUNDLE_IDENTIFIER" \
+  "$INSTALLED_APP/Contents/Info.plist"
+CURRENT_ICON_FILE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
+  "$INSTALLED_APP/Contents/Info.plist" 2>/dev/null || true)"
 
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
   echo "⚠︎ No code-signing identity found; falling back to ad-hoc signing."
@@ -232,7 +247,23 @@ if ! codesign -dvv "$INSTALLED_APP" 2>&1 | grep -E 'flags=.*runtime' >/dev/null;
 fi
 
 echo "▶︎ Refreshing LaunchServices…"
+"$LSREGISTER" -u "$BUILT_APP" >/dev/null 2>&1 || true
+if [[ "$CURRENT_ICON_FILE" != "$PREVIOUS_ICON_FILE" ]]; then
+  echo "▶︎ App icon changed; restarting the user icon cache…"
+  killall iconservicesagent >/dev/null 2>&1 || true
+  # Wait briefly for launchd to restore the per-user cache agent before the
+  # bundle is registered again. The system-level agent is left untouched.
+  for _ in {1..50}; do
+    if pgrep -u "$(id -u)" -x iconservicesagent >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
+fi
 "$LSREGISTER" -f "$INSTALLED_APP"
+if [[ "$CURRENT_ICON_FILE" != "$PREVIOUS_ICON_FILE" ]]; then
+  touch "$INSTALLED_APP"
+fi
 
 echo "▶︎ Launching…"
 open "$INSTALLED_APP"

@@ -17,6 +17,8 @@ APP_NAME="GrokSwitch"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 RES_DIR="$APP_DIR/Contents/Resources"
+BUILD_BUNDLE_IDENTIFIER="com.antony.grokswitch.build"
+APP_BUILD_VERSION="${GROKSWITCH_BUILD_VERSION:-$(date -u +%Y%m%d%H%M%S)}"
 
 # Prefer glob so new Sources/GrokSwitch/*.swift files are not missed.
 # Target: Apple Silicon (arm64) macOS 14+. Intel Macs are not supported by this script.
@@ -40,6 +42,26 @@ swiftc \
   "${SOURCES[@]}"
 
 cp "$ROOT/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
+
+# Keep the staged development bundle distinct from the installed app so
+# LaunchServices never has two paths competing for the production bundle ID.
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUILD_BUNDLE_IDENTIFIER" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_BUILD_VERSION" "$APP_DIR/Contents/Info.plist"
+
+# Bundle app icon (.icns → Finder / Applications / Get Info).
+if [[ -f "$ROOT/Resources/AppIcon-1024.png" ]] && {
+  [[ ! -f "$ROOT/Resources/AppIcon.icns" ]] ||
+  [[ "$ROOT/Resources/AppIcon-1024.png" -nt "$ROOT/Resources/AppIcon.icns" ]] ||
+  [[ "$ROOT/scripts/generate-app-icon.sh" -nt "$ROOT/Resources/AppIcon.icns" ]]
+}; then
+  "$ROOT/scripts/generate-app-icon.sh"
+fi
+if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
+  ICON_HASH="$(shasum -a 256 "$ROOT/Resources/AppIcon.icns" | awk '{print substr($1, 1, 12)}')"
+  ICON_BASENAME="AppIcon-$ICON_HASH"
+  cp "$ROOT/Resources/AppIcon.icns" "$RES_DIR/$ICON_BASENAME.icns"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile $ICON_BASENAME" "$APP_DIR/Contents/Info.plist"
+fi
 
 # Bundle menu-bar brand assets (SVG preferred; PNG fallback).
 if [[ -f "$ROOT/Resources/MenuBarGrok.svg" ]]; then
