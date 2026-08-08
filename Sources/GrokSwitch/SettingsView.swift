@@ -377,7 +377,7 @@ struct SettingsView: View {
 
     private var notesSection: some View {
         SettingsSectionCard(title: "说明", systemImage: "info.circle") {
-            Text("切换账号后，新开的 zsh 终端会通过 ~/.zshrc 加载 GROK_HOME。bash/fish 请手动 source ~/.grokswitch/active.env。已打开的终端需要重开。")
+            Text("切换账号后，新开的 zsh 终端会通过 ~/.zshrc 加载 GROK_HOME，并把该 profile 的 bin 放到 PATH 最前（优先于官方安装的 ~/.grok/bin）。bash/fish 请手动 source ~/.grokswitch/active.env。已打开的终端需要重开。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

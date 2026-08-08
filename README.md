@@ -23,7 +23,13 @@ GROK_HOME=~/.grokswitch/profiles/work     grok
 
 Grok 官方支持 `GROK_HOME` 覆盖配置目录；各 home 内 `auth.json` / `config.toml` / `sessions` 互不干扰。
 
-二进制优先使用 `~/.grok/bin/grok`，其次常见 PATH 位置（不随 profile 切换）。
+二进制解析顺序（与 auto_update 装进 `$GROK_HOME/bin` 对齐）：
+
+1. **当前 profile 的** `$GROK_HOME/bin/grok`（内部 installer 更新目标）
+2. 共享的 `~/.grok/bin/grok` 与常见固定路径
+3. login shell 的 `command -v grok`
+
+`active.env` 会同时 `export GROK_HOME` 并把 `$GROK_HOME/bin` 前置到 `PATH`，避免「更新装进了 profile，日常启动仍走 `~/.grok/bin` 旧版」。
 
 ## 要求
 
@@ -53,21 +59,28 @@ cp -R .build/GrokSwitch.app /Applications/
 ```
 ~/.grokswitch/
   config.json       # profile 列表与当前激活 id（权限 0600）
-  active.env        # export GROK_HOME='…'（shell 安全转义）
+  active.env        # export GROK_HOME + PATH 前置 $GROK_HOME/bin（shell 安全转义）
   profiles/
     default/        # 导入的默认账号
     work/           # 你添加的其它账号
 ```
 
-`~/.zshrc` 中会自动加入：
+`~/.zshrc` 中会自动加入（应在官方 `>>> grok installer >>>` 块**之后**，以便覆盖其 PATH）：
 
 ```bash
 # >>> grokswitch >>>
-# GrokSwitch: apply active GROK_HOME for new shells (zsh only)
+# GrokSwitch: apply active GROK_HOME + profile bin PATH for new shells (zsh only)
 if [ -f "$HOME/.grokswitch/active.env" ]; then
   . "$HOME/.grokswitch/active.env"
 fi
 # <<< grokswitch <<<
+```
+
+`active.env` 示例：
+
+```bash
+export GROK_HOME='/Users/you/.grokswitch/profiles/default'
+export PATH='/Users/you/.grokswitch/profiles/default/bin':"$PATH"
 ```
 
 ### bash / fish
@@ -92,12 +105,23 @@ end
 2. 首次运行会导入当前 `~/.grok` 登录态为「默认」
 3. **添加账号** → 输入名称 → 自动打开终端 → 运行 `grok login`
 4. 之后在菜单里点选即可切换
-5. **新开 zsh 终端** 后 `echo $GROK_HOME` 应指向当前 profile
+5. **新开 zsh 终端** 后 `echo $GROK_HOME` 应指向当前 profile；`which grok` 应优先解析到 `$GROK_HOME/bin/grok`（若该 profile 已有 bin）
 
 已打开的终端不会自动变账号，请重开或：
 
 ```bash
 source ~/.grokswitch/active.env
+```
+
+### 版本「更新了但还是旧版」
+
+`installer = "internal"` 时，自动更新装进**当前** `$GROK_HOME/bin`，不会改写 `~/.grok/bin`。若 shell 仍优先 `~/.grok/bin`，会看起来像没更新。GrokSwitch 通过 `active.env` 前置 profile `bin` 修复这一点。可自检：
+
+```bash
+which -a grok
+echo "GROK_HOME=$GROK_HOME"
+grok --version
+"$GROK_HOME/bin/grok" --version   # 若该 profile 有 bin
 ```
 
 ### 设置入口
@@ -110,7 +134,7 @@ source ~/.grokswitch/active.env
 |------|----------------|
 | Terminal / iTerm2 | 可靠（AppleScript） |
 | Ghostty / Otty / Alacritty / Kitty / WezTerm | 可靠（直接启动二进制） |
-| Warp / Hyper / Tabby | 尽力而为：仅打开应用；依赖 shell hook 的 `GROK_HOME`，需手动 `grok` |
+| Warp / Hyper / Tabby | 尽力而为：仅打开应用；依赖 shell hook 的 `GROK_HOME` + profile `bin` PATH，需手动 `grok` |
 
 ## 配置损坏恢复
 

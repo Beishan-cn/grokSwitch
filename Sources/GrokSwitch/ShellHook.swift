@@ -15,7 +15,7 @@ enum ShellHook {
     static var hookBlock: String {
         """
         \(beginMarker)
-        # GrokSwitch: apply active GROK_HOME for new shells (zsh only)
+        # GrokSwitch: apply active GROK_HOME + profile bin PATH for new shells (zsh only)
         if [ -f "$HOME/.grokswitch/active.env" ]; then
           . "$HOME/.grokswitch/active.env"
         fi

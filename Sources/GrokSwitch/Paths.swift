@@ -53,14 +53,27 @@ enum Paths {
     }
 
     /// Resolve the grok binary path for launching terminals.
-    /// Prefers absolute paths; falls back to a login-interactive shell lookup.
-    static func resolveGrokBinary() -> URL? {
-        let candidates = [
+    ///
+    /// Order:
+    /// 1. `$GROK_HOME/bin/grok` for the given profile (auto_update installs here)
+    /// 2. Shared `~/.grok/bin/grok` and common fixed locations
+    /// 3. Login-interactive shell `command -v grok`
+    ///
+    /// Without (1), menu launch can keep running a stale PATH binary while the
+    /// profile already holds a newer install under its own home.
+    static func resolveGrokBinary(profileHome: URL? = nil) -> URL? {
+        var candidates: [URL] = []
+        if let profileHome {
+            candidates.append(
+                profileHome.standardizedFileURL.appendingPathComponent("bin/grok")
+            )
+        }
+        candidates.append(contentsOf: [
             defaultGrokBinary,
             URL(fileURLWithPath: "/usr/local/bin/grok"),
             URL(fileURLWithPath: "/opt/homebrew/bin/grok"),
             URL(fileURLWithPath: "\(NSHomeDirectory())/.local/bin/grok"),
-        ]
+        ])
         for url in candidates where FileManager.default.isExecutableFile(atPath: url.path) {
             return url
         }

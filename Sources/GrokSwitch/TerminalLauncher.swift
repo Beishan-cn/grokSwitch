@@ -168,11 +168,12 @@ enum TerminalLauncher {
 
     @discardableResult
     static func open(profile: Profile, terminal: TerminalApp, projectPath: String? = nil) throws -> LaunchOutcome {
-        let home = profile.homeURL.standardizedFileURL.path
+        let homeURL = profile.homeURL.standardizedFileURL
+        let home = homeURL.path
         guard Paths.isManagedProfileHome(home) else {
             throw LaunchError.processFailed("账号路径非法")
         }
-        guard let binary = Paths.resolveGrokBinary() else {
+        guard let binary = Paths.resolveGrokBinary(profileHome: homeURL) else {
             throw LaunchError.grokBinaryNotFound
         }
 
@@ -183,7 +184,13 @@ enum TerminalLauncher {
         }
 
         let cwdArg = cwd.map { " --cwd \(ShellQuoting.shellSingleQuoted($0))" } ?? ""
-        let command = "export GROK_HOME=\(ShellQuoting.shellSingleQuoted(home)); exec \(ShellQuoting.shellSingleQuoted(binary.path))\(cwdArg)"
+        // PATH: prefer this profile's bin (auto_update target) over shared ~/.grok/bin.
+        let binPath = homeURL.appendingPathComponent("bin").path
+        let command = [
+            "export GROK_HOME=\(ShellQuoting.shellSingleQuoted(home))",
+            "export PATH=\(ShellQuoting.shellSingleQuoted(binPath)):\"$PATH\"",
+            "exec \(ShellQuoting.shellSingleQuoted(binary.path))\(cwdArg)",
+        ].joined(separator: "; ")
 
         switch terminal {
         case .terminal:
